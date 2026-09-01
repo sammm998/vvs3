@@ -11,12 +11,19 @@ Two facit formats are accepted:
 * the JSON manifest emitted by the fixture generator;
 * a spreadsheet, read with openpyxl, whose header row names the columns
   (designation / diameter / horizontal / vertical / total in any language, by
-  position or by a header keyword).
+  header keyword);
+* a **markup export** - one row per manual annotation, as Bluebeam Revu and
+  similar review tools produce.  Those are recognised by their ``Subject`` plus
+  length columns, aggregated per subject, and their vertical rows (a count of
+  risers times a height) folded into the same designation.  A subject that
+  carries neither a length nor a riser count is a highlight, not a quantity,
+  and is ignored.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -28,12 +35,18 @@ LENGTH_RELATIVE_TOLERANCE = 0.01
 DIAMETER_TOLERANCE_MM = 2.0
 
 _HEADER_HINTS = {
-    "designation": ("designation", "beteckning", "kod", "code", "benamning"),
+    "designation": ("designation", "beteckning", "subject", "kod", "code", "benamning"),
     "diameter": ("diameter", "dimension", "dn", "dim"),
-    "horizontal": ("horizontal", "horisontell", "liggande", "h"),
-    "vertical": ("vertical", "vertikal", "stam", "stigare", "v"),
+    "horizontal": ("horizontal", "horisontell", "liggande", "langd", "längd"),
+    "vertical": ("vertical", "vertikal", "stam", "stigare"),
     "total": ("total", "summa", "totalt", "sum"),
 }
+
+# Markup-export columns: a riser row carries a count and a height instead of a
+# length, and the subject repeats once per annotation.
+_MARKUP_COUNT_HINTS = ("antal",)
+_MARKUP_HEIGHT_HINTS = ("hojd", "höjd", "height")
+_VERTICAL_SUFFIX = re.compile(r"\s*(vertikal|vertical|stam|riser)\s*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,23 +98,79 @@ def _load_xlsx(path: Path) -> tuple[TruthRow, ...]:
             if any(hint in h for hint in hints):
                 idx.setdefault(field, i)
                 break
-    out: list[TruthRow] = []
-    for raw in rows[1:]:
-        if not raw or idx.get("designation") is None:
-            continue
-        designation = raw[idx["designation"]]
-        if designation is None or not str(designation).strip():
-            continue
-        out.append(
-            TruthRow(
-                designation=str(designation).strip(),
-                diameter_mm=_num(_cell(raw, idx.get("diameter"))),
-                horizontal_m=_num(_cell(raw, idx.get("horizontal"))),
-                vertical_m=_num(_cell(raw, idx.get("vertical"))),
-                total_m=_num(_cell(raw, idx.get("total"))),
+    count_col = next((i for i, h in enumerate(header) if any(x in h for x in _MARKUP_COUNT_HINTS)), None)
+    height_col = next((i for i, h in enumerate(header) if any(x in h for x in _MARKUP_HEIGHT_HINTS)), None)
+    is_markup = count_col is not None and height_col is not None
+
+    if idx.get("designation") is None:
+        return ()
+
+    if not is_markup:
+        out: list[TruthRow] = []
+        for raw in rows[1:]:
+            if not raw:
+                continue
+            designation = raw[idx["designation"]]
+            if designation is None or not str(designation).strip():
+                continue
+            out.append(
+                TruthRow(
+                    designation=str(designation).strip(),
+                    diameter_mm=_num(_cell(raw, idx.get("diameter"))),
+                    horizontal_m=_num(_cell(raw, idx.get("horizontal"))),
+                    vertical_m=_num(_cell(raw, idx.get("vertical"))),
+                    total_m=_num(_cell(raw, idx.get("total"))),
+                )
             )
+        return tuple(sorted(out, key=lambda r: (r.designation, r.diameter_mm or -1.0)))
+
+    # Markup export: aggregate one row per annotation into one row per subject.
+    agg: dict[str, dict[str, float]] = {}
+    for raw in rows[1:]:
+        if not raw:
+            continue
+        subject = raw[idx["designation"]]
+        if subject is None or not str(subject).strip():
+            continue
+        subject = str(subject).strip()
+        length = _num(_cell(raw, idx.get("horizontal")))
+        count = _num(_cell(raw, count_col))
+        height = _num(_cell(raw, height_col))
+        if length is None and not count:
+            continue  # a highlight, not a quantity
+        base = _VERTICAL_SUFFIX.sub("", subject).strip()
+        bucket = agg.setdefault(base, {"horizontal": 0.0, "vertical": 0.0})
+        if _VERTICAL_SUFFIX.search(subject):
+            bucket["vertical"] += (count or 0.0) * (height or 0.0)
+        elif length is not None:
+            bucket["horizontal"] += length
+    out = [
+        TruthRow(
+            designation=name,
+            diameter_mm=_trailing_size(name),
+            horizontal_m=round(v["horizontal"], 4),
+            vertical_m=round(v["vertical"], 4),
+            total_m=round(v["horizontal"] + v["vertical"], 4),
         )
-    return tuple(sorted(out, key=lambda r: (r.designation, r.diameter_mm or -1.0)))
+        for name, v in sorted(agg.items())
+    ]
+    return tuple(out)
+
+
+def _trailing_size(designation: str) -> float | None:
+    """The trailing numeric run of a code, if it is a plausible nominal size.
+
+    Read the same way the engine reads it, so a comparison keyed on
+    (designation, size) lines the two sides up.
+    """
+    parts = designation.replace(" ", "").split("-")
+    if not parts:
+        return None
+    last = parts[-1]
+    if not last.isdigit():
+        return None
+    value = float(last)
+    return value if 10.0 <= value <= 3000.0 else None
 
 
 def _cell(row: Sequence[Any], i: int | None) -> Any:

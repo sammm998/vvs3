@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+from .artwork import detect_artwork
 from .association import associate_designations
 from .canonical import canonical_json, canonical_sort, digest, ql, qs
 from .designations import detect_panels, discover_designations
@@ -42,7 +43,7 @@ from .model import (
     VerticalSegment,
 )
 from .pdf_forensics import ForensicReport, forensic_report
-from .pipes import detect_pipes, single_line_candidates
+from .pipes import detect_pipes, reconstruct_dashes, single_line_candidates
 from .states import IdentityState, Reason, ScaleState
 from .text_reconstruction import reconstruct_text
 from .topology import build_graph, build_physical_pipes, build_runs
@@ -196,11 +197,26 @@ def analyse_extracted(
 
 
 def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig) -> PageResult:
-    objects = doc.objects_on(page)
+    all_objects = doc.objects_on(page)
     spans = doc.spans_on(page)
     box = BBox(0.0, 0.0, page_info.width, page_info.height)
 
-    segmentation = segment_glyphs(objects, box)
+    # Traced artwork (a vectorised logo or badge) is thousands of tiny filled
+    # paths carrying no drawing information.  It is removed first: left in, it
+    # sets the text stage's size statistics and dominates the run time.
+    artwork_regions, artwork_ids = detect_artwork(all_objects, box)
+    objects = [o for o in all_objects if o.object_id not in artwork_ids]
+
+    # Dashed linework is reassembled *before* the text stage.  A dash and a
+    # glyph stroke are the same size, so a blobber cannot tell them apart; once
+    # the dashes of a bundle of parallel pipes are in play they merge laterally
+    # with each other and with any label they pass, and the text stage collapses.
+    # Only chains far longer than any character can be are taken, so lettering
+    # is left for the text stage.
+    dash_chains, dash_consumed, dash_diagnostics = reconstruct_dashes(objects, box)
+    for_text = [o for o in objects if o.object_id not in dash_consumed]
+
+    segmentation = segment_glyphs(for_text, box)
     caps = sorted(l.cap_height for l in segmentation.lines)
     cap = caps[len(caps) // 2] if caps else 7.0
 
@@ -209,7 +225,13 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
     panel_boxes = [p.bbox for p in panels]
 
     detection = detect_pipes(
-        objects, box, page, text.consumed_object_ids, panel_boxes, cap
+        objects,
+        box,
+        page,
+        text.consumed_object_ids,
+        panel_boxes,
+        cap,
+        dash_chains=dash_chains,
     )
     discovery = discover_designations(
         text.items, objects, panels, box, page, exclude_object_ids=detection.consumed_object_ids
@@ -314,6 +336,9 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
         "dimensionReconciliation": dimension_notes,
         "scaleState": scale.state.value,
         "unresolvedGlyphs": sum(1 for g in text.glyphs if g.character is None),
+        "artworkRegions": [r.to_canonical() for r in artwork_regions],
+        "artworkObjectsExcluded": len(artwork_ids),
+        "dashReconstruction": dash_diagnostics,
     }
 
     return PageResult(

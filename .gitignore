@@ -5,3 +5,4 @@ node_modules/
 dist/
 artifacts/
 .pytest_cache/
+web-storage/

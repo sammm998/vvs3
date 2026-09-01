@@ -12,9 +12,19 @@ rule rather than by position on the sheet:
 * **symbols** - closed contours whose extent is small compared with the
   drawing's text height (riser circles, valve symbols).
 
-What survives is split into double-line pipes (two parallel strokes, see
-:mod:`vvs_pipe.pipes.centerline`) and single-line pipes (a stroke that no
-partner claimed but is long and slender enough to be pipework in a schematic).
+What survives is split into:
+
+* **dashed pipes** - runs already reassembled by
+  :mod:`vvs_pipe.pipes.dashes` from a dashed linetype's individual dashes.
+  Below-slab and concealed pipework is drawn this way, so on a real sheet this
+  is the majority;
+* **double-line pipes** - two parallel strokes, see
+  :mod:`vvs_pipe.pipes.centerline`, which carry a drawn width;
+* **single-line pipes** - a stroke no partner claimed that is long and slender
+  enough to be pipework in a schematic.
+
+Only a double-line pipe has a drawn width; the other two carry their size in
+the label alone, which :mod:`vvs_pipe.dimensions` handles explicitly.
 """
 
 from __future__ import annotations
@@ -28,6 +38,7 @@ from ..geometry.primitives import BBox, Segment
 from ..model import Confidence, PipeCandidate, Provenance, VectorObject
 from ..states import Reason
 from .centerline import DoubleLinePair, PairingConfig, SegmentRef, pair_double_lines
+from .dashes import DashChain
 
 Pt = tuple[float, float]
 
@@ -88,6 +99,7 @@ def detect_pipes(
     cfg: DetectionConfig | None = None,
     explained_object_ids: frozenset[str] = frozenset(),
     include_single_lines: bool = False,
+    dash_chains: Sequence[DashChain] = (),
 ) -> PipeDetection:
     """Find double-line pipes, and optionally accept leftover single strokes.
 
@@ -125,8 +137,24 @@ def detect_pipes(
 
     excluded: set[str] = set()
     refs: list[SegmentRef] = []
+
+    # Dashed runs come pre-assembled; their member dashes are spoken for and
+    # must not also be offered to the pairing or single-line stages.
+    dash_candidates: list[PipeCandidate] = []
+    dash_consumed: set[str] = set()
+    for chain in dash_chains:
+        if any(oid in consumed_by_text or oid in explained_object_ids for oid in chain.object_ids):
+            continue
+        if any(p.contains_box(BBox.from_points(chain.polyline)) for p in panel_boxes):
+            continue
+        dash_candidates.append(_candidate_from_chain(chain, page))
+        dash_consumed.update(chain.object_ids)
     for o in ordered:
-        if o.object_id in consumed_by_text or o.object_id in explained_object_ids:
+        if (
+            o.object_id in consumed_by_text
+            or o.object_id in explained_object_ids
+            or o.object_id in dash_consumed
+        ):
             excluded.add(o.object_id)
             continue
         if not o.is_stroked:
@@ -171,8 +199,9 @@ def detect_pipes(
             excluded.add(o.object_id)
 
     pairs, consumed = pair_double_lines(refs, cfg.pairing)
+    consumed = set(consumed) | dash_consumed
 
-    candidates: list[PipeCandidate] = []
+    candidates: list[PipeCandidate] = list(dash_candidates)
     for p in pairs:
         candidates.append(
             _candidate_from_pair(p, page, cfg)
@@ -252,6 +281,42 @@ def _candidate_from_pair(p: DoubleLinePair, page: int, cfg: DetectionConfig) -> 
             rule="parallel stroke pair -> midline of mutual overlap",
             source_object_ids=sources,
             notes=(f"widthPt={qs(p.width_pt)}",),
+        ),
+    )
+
+
+def _candidate_from_chain(chain: DashChain, page: int) -> PipeCandidate:
+    """One reassembled dashed run becomes one pipe candidate.
+
+    It carries no drawn width - a dashed centreline is a single stroke - so the
+    size has to come from the label, and the evidence records how many dashes
+    and how many bridged gaps went into it so the reassembly can be audited.
+    """
+    duty = chain.ink_length_pt / max(chain.length_pt, 1e-9)
+    return PipeCandidate(
+        candidate_id=entity_id("pc", (page, chain.key(), "dashed_line")),
+        page=page,
+        centerline=chain.polyline,
+        style="dashed_line",
+        width_pt=None,
+        stroke_width=chain.stroke_width,
+        color=chain.color,
+        dashes=chain.dashes,
+        source_object_ids=chain.object_ids,
+        accepted=True,
+        rejection_reason=None,
+        confidence=Confidence(geometry=qs(min(0.95, 0.55 + 0.05 * min(8, chain.member_count)))),
+        evidence=(
+            ("dashes", float(chain.member_count)),
+            ("bridgedGaps", float(chain.bridged_gaps)),
+            ("inkDutyCycle", qs(min(1.0, duty))),
+            ("lengthPt", qs(chain.length_pt)),
+        ),
+        provenance=Provenance(
+            stage="pipe-detection",
+            rule="dashed linetype reassembled from its dashes",
+            source_object_ids=chain.object_ids,
+            notes=(f"layer={chain.layer}", f"members={chain.member_count}"),
         ),
     )
 

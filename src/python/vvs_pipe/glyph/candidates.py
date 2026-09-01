@@ -3,12 +3,19 @@
 Nothing in this module knows what the characters will turn out to be.  It
 performs the two classical steps of vector-text recovery:
 
-1. **word blobbing** - small stroked objects are grouped by adaptive proximity
-   into blobs (one blob ~ one word/token);
-2. **projection-profile segmentation** - inside a blob the objects are
-   projected onto the blob's principal axis and split wherever the projection
-   coverage is empty.  Non-touching CAD fonts are separated exactly by this,
-   with no per-character knowledge at all.
+1. **blobbing** - small stroked objects are grouped by adaptive proximity.  On
+   a real sheet a blob is usually a whole *label*: several lines of text inside
+   a box, with a rule between them;
+2. **furniture removal** - inside a blob, a fragment far longer than the blob's
+   own typical fragment is a box edge or an underline, not part of a letter.
+   Left in, a single underline spans every character in projection and the
+   whole label collapses into one glyph;
+3. **line splitting** - the remaining fragments are projected onto the axis
+   *across* the text and split at empty coverage, separating the lines of a
+   multi-line label;
+4. **character splitting** - inside each line the objects are projected along
+   the text and split wherever coverage is empty.  Non-touching CAD fonts are
+   separated exactly by this, with no per-character knowledge at all.
 
 The blob's principal axis also yields the text rotation, so rotated annotation
 text is handled by the same code path.
@@ -59,14 +66,18 @@ class GlyphSegmentation:
 
 @dataclass(frozen=True, slots=True)
 class SegmentationConfig:
-    max_fragment_diag_ratio: float = 0.025  # of page diagonal
+    max_fragment_diag_ratio: float = 0.02  # of page diagonal
     min_fragment_extent_pt: float = 0.05
-    max_straight_stroke_ratio: float = 2.0  # of the median fragment height
+    max_straight_stroke_ratio: float = 2.0  # of the estimated text cap height
+    cap_percentile: float = 0.90
     blob_gap_ratio: float = 0.55  # of the larger fragment height
     glyph_split_epsilon_ratio: float = 0.02  # of cap height
     min_cap_height_pt: float = 1.2
     max_cap_height_pt: float = 60.0
     solid_dot_cap_ratio: float = 0.25
+    furniture_extent_ratio: float = 4.0     # of the blob's median fragment extent
+    furniture_min_fragments: int = 6
+    line_split_gap_ratio: float = 0.18      # of the blob's fragment extent scale
 
 
 def _fragment_height(o: VectorObject) -> float:
@@ -108,15 +119,27 @@ def segment_glyphs(
     if not frags:
         return GlyphSegmentation((), frozenset())
 
-    heights = sorted(_fragment_height(o) for o in frags)
-    median_h = heights[len(heights) // 2]
-    floor_h = max(cfg.min_cap_height_pt, 0.5 * median_h)
+    # Estimate the drawing's text cap height.  A *median* fragment height is the
+    # wrong statistic: a real CAD exporter splits each character into several
+    # sub-strokes, so most fragments are far shorter than the cap and the median
+    # lands among them.  On the reference sheet that median is 1.4 pt against a
+    # 6.4 pt cap, which would classify every full-height stem as a leader and
+    # gut the alphabet.  A high percentile of the fragment *extent*
+    # tracks the cap instead, because the largest fragments of a text-bearing
+    # sheet are its full-height strokes; the extent rather than the height is
+    # used so rotated text is measured the same way.
+    heights = sorted(max(o.bbox.width, o.bbox.height) for o in frags)
+    cap_estimate = max(
+        heights[min(len(heights) - 1, int(len(heights) * cfg.cap_percentile))],
+        cfg.min_cap_height_pt,
+    )
+    floor_h = max(cfg.min_cap_height_pt, 0.5 * cap_estimate)
 
     # A single straight segment much longer than the local text height is a
     # leader, a hatch or a symbol stroke, not part of a letter.  Excluding it
     # matters because such a segment would otherwise *bridge* a label to the
     # geometry it points at and destroy the blob boundaries.
-    max_straight = cfg.max_straight_stroke_ratio * max(median_h, cfg.min_cap_height_pt)
+    max_straight = cfg.max_straight_stroke_ratio * cap_estimate
     frags = [
         o
         for o in frags
@@ -147,6 +170,17 @@ def segment_glyphs(
     used: set[str] = set()
     for comp in comps:
         members = [frags[i] for i in comp]
+
+        # Furniture removal: a box edge or an underline is far longer than the
+        # strokes of the characters it encloses.
+        extents = sorted(max(m.bbox.width, m.bbox.height) for m in members)
+        scale = extents[len(extents) // 2] if extents else 0.0
+        if len(members) >= cfg.furniture_min_fragments and scale > 0:
+            limit = cfg.furniture_extent_ratio * scale
+            members = [m for m in members if max(m.bbox.width, m.bbox.height) <= limit]
+        if not members:
+            continue
+
         pts: list[Pt] = [p for m in members for p in m.points]
         theta = _principal_angle(pts) if len(members) > 1 else 0.0
         # Fold the undirected principal axis into (-90, 90] so that projection
@@ -159,82 +193,93 @@ def segment_glyphs(
         def proj(p: Pt) -> tuple[float, float]:
             return (p[0] * ux + p[1] * uy, p[0] * vx + p[1] * vy)
 
-        perp = [proj(p)[1] for p in pts]
-        cap = max(perp) - min(perp)
-        if not (cfg.min_cap_height_pt <= cap <= cfg.max_cap_height_pt):
-            # Not text-shaped in the cross-line direction; leave the geometry
-            # for the pipe stages rather than inventing characters.
-            if cap > cfg.max_cap_height_pt:
-                continue
-        cap = max(cap, cfg.min_cap_height_pt)
-
-        intervals: list[tuple[float, float, VectorObject]] = []
+        # Line splitting: split across the text where the coverage is empty.
+        bands: list[list[VectorObject]] = []
+        line_gap = max(cfg.line_split_gap_ratio * max(scale, cfg.min_cap_height_pt), 0.2)
+        spans: list[tuple[float, float, VectorObject]] = []
         for m in members:
             ps = [proj(p) for p in m.points]
-            intervals.append((min(p[0] for p in ps), max(p[0] for p in ps), m))
-        intervals.sort(key=lambda t: (qc(t[0]), qc(t[1]), t[2].canonical_key()))
+            spans.append((min(p[1] for p in ps), max(p[1] for p in ps), m))
+        spans.sort(key=lambda t: (qc(t[0]), qc(t[1]), t[2].canonical_key()))
+        cur_band: list[VectorObject] = []
+        band_hi = -math.inf
+        for lo, hi, m in spans:
+            if cur_band and lo > band_hi + line_gap:
+                bands.append(cur_band)
+                cur_band = []
+                band_hi = -math.inf
+            cur_band.append(m)
+            band_hi = max(band_hi, hi)
+        if cur_band:
+            bands.append(cur_band)
 
-        eps = cfg.glyph_split_epsilon_ratio * cap
-        groups: list[list[VectorObject]] = []
-        cur: list[VectorObject] = []
-        cur_hi = -math.inf
-        for lo, hi, m in intervals:
-            if cur and lo > cur_hi + eps:
+        for band in bands:
+            band_pts = [proj(p) for m in band for p in m.points]
+            cap = max(p[1] for p in band_pts) - min(p[1] for p in band_pts)
+            if cap > cfg.max_cap_height_pt:
+                continue
+            cap = max(cap, cfg.min_cap_height_pt)
+
+            intervals: list[tuple[float, float, VectorObject]] = []
+            for m in band:
+                ps = [proj(p) for p in m.points]
+                intervals.append((min(p[0] for p in ps), max(p[0] for p in ps), m))
+            intervals.sort(key=lambda t: (qc(t[0]), qc(t[1]), t[2].canonical_key()))
+
+            eps = cfg.glyph_split_epsilon_ratio * cap
+            groups: list[list[VectorObject]] = []
+            cur: list[VectorObject] = []
+            cur_hi = -math.inf
+            for lo, hi, m in intervals:
+                if cur and lo > cur_hi + eps:
+                    groups.append(cur)
+                    cur = []
+                    cur_hi = -math.inf
+                cur.append(m)
+                cur_hi = max(cur_hi, hi)
+            if cur:
                 groups.append(cur)
-                cur = []
-                cur_hi = -math.inf
-            cur.append(m)
-            cur_hi = max(cur_hi, hi)
-        if cur:
-            groups.append(cur)
 
-        # The provisional cap height above is the blob's full perpendicular
-        # extent, which one stray tick mark beside the text is enough to
-        # inflate - and every glyph's height and baseline feature is measured
-        # against it.  Once the glyphs are separated the cap is re-estimated
-        # from the *distribution* of glyph heights, which a few outliers cannot
-        # move.  Same for the baseline: it is the level the full-height
-        # characters sit on, not the lowest ink in the blob.
-        glyphs: list[GlyphGroup] = []
-        for order, g in enumerate(groups):
-            polys = tuple(tuple(o.points) for o in g)
-            box = BBox.union_all([o.bbox for o in g])
-            # A closed contour far smaller than the cap height reads as solid
-            # ink at drawing scale (a period, a comma, a bullet), so it is
-            # rasterised filled.  Without this a stroked 1-unit square would
-            # present an enclosed hole and never match a full stop.
-            tiny_closed = all(o.closed for o in g) and box.height <= cfg.solid_dot_cap_ratio * cap
-            glyphs.append(
-                GlyphGroup(
-                    object_ids=tuple(sorted(o.object_id for o in g)),
-                    polylines=polys,
+            glyphs: list[GlyphGroup] = []
+            for order, g in enumerate(groups):
+                polys = tuple(tuple(o.points) for o in g)
+                gbox = BBox.union_all([o.bbox for o in g])
+                # A closed contour far smaller than the cap height reads as
+                # solid ink at drawing scale (a period, a comma, a bullet), so
+                # it is rasterised filled.  Without this a stroked 1-unit square
+                # would present an enclosed hole and never match a full stop.
+                tiny_closed = all(o.closed for o in g) and gbox.height <= cfg.solid_dot_cap_ratio * cap
+                glyphs.append(
+                    GlyphGroup(
+                        object_ids=tuple(sorted(o.object_id for o in g)),
+                        polylines=polys,
+                        bbox=gbox,
+                        filled=any(o.is_filled for o in g) or tiny_closed,
+                        order=order,
+                    )
+                )
+            if not glyphs:
+                continue
+            box = BBox.union_all([g.bbox for g in glyphs])
+            heights = sorted(g.bbox.height for g in glyphs)
+            robust_cap = heights[int(0.75 * (len(heights) - 1))] if heights else 0.0
+            if robust_cap >= cfg.min_cap_height_pt:
+                cap = robust_cap
+            tall = [g for g in glyphs if g.bbox.height >= 0.7 * cap]
+            bottoms = sorted((g.bbox.y1 for g in tall) or (g.bbox.y1 for g in glyphs))
+            baseline_y = bottoms[len(bottoms) // 2] if bottoms else box.y1
+            lines.append(
+                TextLine(
+                    glyphs=tuple(glyphs),
                     bbox=box,
-                    filled=any(o.is_filled for o in g) or tiny_closed,
-                    order=order,
+                    rotation_deg=math.degrees(theta),
+                    cap_height=cap,
+                    baseline_offset=max(p[1] for p in band_pts),
+                    baseline_y=baseline_y,
                 )
             )
-        if not glyphs:
-            continue
-        box = BBox.union_all([g.bbox for g in glyphs])
-        heights = sorted(g.bbox.height for g in glyphs)
-        robust_cap = heights[int(0.75 * (len(heights) - 1))] if heights else 0.0
-        if robust_cap >= cfg.min_cap_height_pt:
-            cap = robust_cap
-        tall = [g for g in glyphs if g.bbox.height >= 0.7 * cap]
-        bottoms = sorted((g.bbox.y1 for g in tall) or (g.bbox.y1 for g in glyphs))
-        baseline_y = bottoms[len(bottoms) // 2] if bottoms else box.y1
-        lines.append(
-            TextLine(
-                glyphs=tuple(glyphs),
-                bbox=box,
-                rotation_deg=math.degrees(theta),
-                cap_height=cap,
-                baseline_offset=max(perp),
-                baseline_y=baseline_y,
-            )
-        )
-        for g in glyphs:
-            used.update(g.object_ids)
+            for g in glyphs:
+                used.update(g.object_ids)
 
     lines = canonical_sort(lines, key=lambda l: (l.bbox.key(), len(l.glyphs)))
     return GlyphSegmentation(tuple(lines), frozenset(used))

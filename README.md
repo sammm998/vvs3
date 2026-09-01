@@ -84,12 +84,26 @@ Outputs: `forensics.json`, `analysis.json`, `marked.pdf`, `debug.pdf`,
 
 ### The web app
 
+Two front ends speak the same JSON contract:
+
 ```bash
-npm install && npm run serve   # http://localhost:8080
+python main.py                 # http://localhost:8080 - no build step
+npm install && npm run serve   # http://localhost:8080 - typed TS layer
 ```
 
-Upload a PDF, watch the stages, then read the marked drawing beside the
-engine's tables and download the marked PDF, the CSV or the JSON report.
+`main.py` is the **deployment entry point**: pure standard library plus the
+engine, so a PaaS that detects Python (Railway/Railpack, Heroku, Fly, Render)
+runs it with no Node build. `railpack.json` and `Procfile` both declare
+`python main.py`, and the service honours `PORT`, binds `0.0.0.0` and exposes
+`/healthz`. Analyses run on a single background worker, so an upload returns a
+job immediately and a large sheet does not block the request.
+
+`src/ts` is the typed domain/API/UI layer required by the architecture: the
+same endpoints, with the report contract expressed as TypeScript types and
+checked against real engine output by `src/ts/test/service.test.ts`.
+
+Either way: upload a PDF, watch the stages, then read the marked drawing beside
+the engine's tables and download the marked PDF, the CSV or the JSON report.
 
 ## Guarantees the tests enforce
 

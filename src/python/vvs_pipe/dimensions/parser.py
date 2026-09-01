@@ -78,13 +78,17 @@ def resolve_diameter(
             confidence=0.8,
         )
     if label_mm is not None:
+        # No measurement to corroborate with: either the scale is unknown, or -
+        # far more commonly on a real sheet - the pipe is drawn as a single
+        # dashed centreline that has no width to measure.
+        reason = Reason.SCALE_UNKNOWN if metres_per_point is None else Reason.NO_DRAWN_WIDTH
         return DimensionResult(
             diameter_mm=ql(label_mm),
             source="label",
             label_mm=ql(label_mm),
             measured_mm=None,
-            reasons=(Reason.SCALE_UNKNOWN,),
-            confidence=0.55,
+            reasons=(reason,),
+            confidence=0.7 if metres_per_point is not None else 0.55,
         )
     return DimensionResult(
         diameter_mm=None,

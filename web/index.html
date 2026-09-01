@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VVS pipe take-off</title>
+    <style>
+      :root { color-scheme: light dark; --line: #8884; }
+      * { box-sizing: border-box; }
+      body { margin: 0; font: 13px/1.55 ui-sans-serif, system-ui, sans-serif; }
+      header { display: flex; gap: .9rem; align-items: center; flex-wrap: wrap;
+               padding: .7rem 1rem; border-bottom: 1px solid var(--line); }
+      h1 { font-size: 15px; margin: 0; font-weight: 650; }
+      main { display: grid; grid-template-columns: 1fr minmax(340px, 460px); gap: 1rem; padding: 1rem; align-items: start; }
+      @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+      iframe { width: 100%; height: 74vh; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+      section { border: 1px solid var(--line); border-radius: 6px; padding: .75rem; margin-bottom: 1rem; }
+      section > h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; margin: 0 0 .5rem; opacity: .7; }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      th, td { text-align: left; padding: .25rem .4rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { font-weight: 600; opacity: .75; }
+      .kv { display: flex; justify-content: space-between; gap: 1rem; }
+      .kv span { opacity: .7; }
+      pre { margin: 0; font-size: 11px; max-height: 9rem; overflow: auto; opacity: .8; white-space: pre-wrap; }
+      label.file, a.dl { border: 1px solid var(--line); border-radius: 5px; padding: .3rem .6rem; cursor: pointer; text-decoration: none; color: inherit; }
+      #status { opacity: .8; }
+      .warn { color: #c65; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>VVS pipe take-off</h1>
+      <label class="file">Open drawing<input id="file" type="file" accept="application/pdf" hidden /></label>
+      <span id="status">no drawing loaded</span>
+    </header>
+    <main>
+      <div><iframe id="viewer" title="marked drawing"></iframe></div>
+      <div>
+        <section><h2>Drawing</h2><div id="summary"></div></section>
+        <section><h2>Quantities</h2><div id="quantities"></div></section>
+        <section><h2>Verticals</h2><div id="verticals"></div></section>
+        <section><h2>Downloads</h2>
+          <a class="dl" id="dl-pdf" href="#">marked PDF</a>
+          <a class="dl" id="dl-csv" href="#">quantities CSV</a>
+          <a class="dl" id="dl-json" href="#">JSON report</a>
+        </section>
+        <section><h2>Progress</h2><pre id="progress"></pre></section>
+      </div>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
