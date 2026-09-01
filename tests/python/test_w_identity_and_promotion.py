@@ -513,3 +513,51 @@ def test_two_pipes_equally_close_to_an_inline_label_leave_it_ambiguous():
     result = associate_designations([label], [a, b], {}, {"runA": None, "runB": None}, 7.0)
     assert not [x for x in result.assignments.values() if x.designation]
     assert any(code == Reason.COMPETING_PIPES.value for _id, code in result.diagnostics)
+
+
+# ------------------------------------------------------- stacked-part merging
+
+
+def _stroke(x0, y0, x1, y1, oid):
+    return _object(((x0, y0), (x1, y1)), oid)
+
+
+def test_stacked_parts_of_very_different_widths_still_join():
+    """An R's bowl and leg, or a G's arc and bar, are one character.
+
+    Recorded because the obvious-looking strengthening of this rule - requiring
+    the overlap to cover the *wider* part as well, which would have excluded the
+    rules drawn across a stacked label - fragments real characters instead.  On
+    the reference sheet it cost the alphabet: R read as 9, the scale note's
+    colon lost, and F1 against the facit fell from 0.42 to 0.16.
+    """
+    from vvs_pipe.glyph import segment_glyphs
+
+    objects = [
+        _stroke(300.0, 100.0, 300.0, 107.0, "stem"),
+        _stroke(300.0, 107.0, 304.0, 107.0, "bowl_top"),
+        _stroke(304.0, 103.5, 304.0, 107.0, "bowl_side"),
+        _stroke(300.0, 103.5, 304.0, 103.5, "bowl_bottom"),
+        _stroke(301.5, 103.5, 303.0, 100.0, "leg"),
+    ]
+    result = segment_glyphs(objects, BBox(0.0, 0.0, 600.0, 200.0))
+    groups = [g for line in result.lines for g in line.glyphs]
+    assert groups, "the character must be found"
+    biggest = max(groups, key=lambda g: len(g.object_ids))
+    assert len(biggest.object_ids) >= 4, "the parts of one character must stay together"
+
+
+def test_a_colon_is_still_rejoined_from_its_two_dots():
+    """Zero-width parts are aligned on their centres, not by overlap ratio."""
+    from vvs_pipe.glyph import segment_glyphs
+
+    objects = [
+        _stroke(300.0, 101.0, 300.0, 101.5, "dot_low"),
+        _stroke(300.0, 104.5, 300.0, 105.0, "dot_high"),
+        _stroke(295.0, 100.0, 295.0, 107.0, "stem"),
+        _stroke(305.0, 100.0, 305.0, 107.0, "stem2"),
+    ]
+    result = segment_glyphs(objects, BBox(0.0, 0.0, 600.0, 200.0))
+    groups = [g for line in result.lines for g in line.glyphs]
+    joined = [g for g in groups if {"dot_low", "dot_high"} <= set(g.object_ids)]
+    assert joined, "the two dots of a colon must come back as one character"

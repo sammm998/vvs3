@@ -205,6 +205,16 @@ def _merge_stacked_parts(
             overlap = min(bi.x1, bj.x1) - max(bi.x0, bj.x0)
             narrower = min(bi.width, bj.width)
             if narrower > cfg.min_fragment_extent_pt:
+                # A stacked part is tested against the *narrower* of the two on
+                # purpose.  Requiring the overlap to cover the wider one as well
+                # looks symmetric and is wrong: the stacked parts of a real
+                # character are routinely very different widths - an R's bowl
+                # against its leg, a G's bar against its arc - and demanding
+                # mutual coverage fragments them.  Measured on the reference
+                # sheet, it cost the whole alphabet: R read as 9, the scale
+                # note's colon was lost again, and F1 against the facit fell
+                # from 0.42 to 0.16.  A rule drawn across a label therefore has
+                # to be recognised as a rule, not excluded by this test.
                 if overlap / narrower < cfg.stack_overlap_ratio:
                     continue
             elif abs(bi.center[0] - bj.center[0]) > cfg.stack_align_ratio * cap:

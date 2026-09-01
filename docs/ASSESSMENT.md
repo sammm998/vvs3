@@ -271,11 +271,26 @@ characters.
   take-off.
 * **A label's size line often fails to resolve.**  Thirty-four instances of
   `S3-R8` on the sheet have their size written on a second line directly below,
-  and that line reconstructs as a single unresolved glyph 9.96 x 9.12 pt - two
-  digits assembled as one character.  Character assembly uses a single
-  sheet-wide cap height, so lettering at any other size is mis-segmented, and
-  this size line is 1.4 caps tall.  Fixing that would turn a whole class of
-  partial readings into complete ones.
+  and that line reconstructs as a single unresolved glyph 9.96 x 9.12 pt.  The
+  cause is now known exactly: the drawing brackets each stacked size line
+  between two horizontal **rules**, 9.96 pt wide and 0.00 pt tall, and
+  ``_merge_stacked_parts`` absorbs them into the characters between them.
+  Fixing this would turn a whole class of partial readings into complete ones,
+  and it is the largest single remaining error on the sheet.
+
+  One approach was tried and rejected, which is worth recording because it
+  looks right.  Requiring the overlap to cover the *wider* part as well as the
+  narrower excludes a rule cleanly - a rule covers the character but extends
+  far beyond it - but it also fragments real characters, whose stacked parts
+  are routinely very different widths: an ``R``'s bowl against its leg, a
+  ``G``'s bar against its arc.  Measured, it cost the whole alphabet: ``R``
+  read as ``9`` again, the scale note's colon lost again, scale back to
+  SCALE_CONFLICT, and F1 against the facit down from 0.42 to 0.16.  It is
+  reverted, and ``tests/python/test_w_identity_and_promotion.py`` now pins the
+  behaviour it broke.  Width alone cannot separate the two either: those rules
+  are 1.5 cap heights wide and the drawing's own hyphens reach 1.8.  A rule has
+  to be *recognised* - a flat stroke with a parallel partner bracketing content
+  between them - rather than excluded by tightening this test.
 * **K/X and V/Y are confused**, which is what loses `KV1-X31-16`,
   `KV2-X31-16` and `VV1-X31-16`.  The drawing's own font would settle it, but
   the embedded ISOCPEUR subset maps only `-.0124579ABELMNP`: the lettering was
