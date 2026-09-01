@@ -488,12 +488,19 @@ def _merge_overlapping(boxes: Sequence[BBox]) -> list[BBox]:
     if not boxes:
         return []
     ordered = canonical_sort(list(boxes), key=lambda b: b.key())
+    # Indexed rather than compared pairwise: a sheet whose title block is a
+    # grid of framed cells produces hundreds of candidates, and the quadratic
+    # version of this loop is the one thing here that would not scale with the
+    # drawing.
+    index: SpatialIndex[int] = SpatialIndex.for_items(
+        [(b, i) for i, b in enumerate(ordered)]
+    )
     edges: list[tuple[int, int]] = []
-    for i in range(len(ordered)):
-        for j in range(i + 1, len(ordered)):
-            if ordered[i].intersects(ordered[j]):
+    for i, b in enumerate(ordered):
+        for j in index.query_box(b):
+            if j > i and b.intersects(ordered[j]):
                 edges.append((i, j))
-    comps = connected_components(len(ordered), edges)
+    comps = connected_components(len(ordered), sorted(edges))
     return [BBox.union_all([ordered[i] for i in comp]) for comp in comps]
 
 

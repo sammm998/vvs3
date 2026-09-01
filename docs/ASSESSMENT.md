@@ -156,3 +156,104 @@ must be a gate.
 5. Multi-hypothesis scale.
 6. Evidence records, coverage and confidence reporting.
 7. Deployment worker and UI.
+
+---
+
+# Outcome
+
+Same sheet, same blind run, after the corrections above.
+
+| | before | after |
+| --- | --- | --- |
+| `ANALYSIS_STATUS` | (none) | **VALID** |
+| reconciliation | FAILED — 24 shared centerlines, 66 runs in two pipes | **OK** |
+| scale | `SCALE_UNKNOWN` | **RESOLVED, 1:50** |
+| designations reported | 1 491 (= every text item) | 19 confirmed, 123 candidates, 1 333 text-only |
+| pipe runs | 802 | 405 |
+| physical pipes measured | 0 | 215 of 215 |
+| lettering | `S3-98-75` | `S3-R8-75` |
+
+## What each fix actually was
+
+**Reconciliation.** Not a tolerance and not a threshold: the engine addresses
+entities by content but never enforced that identity as a set.  Duplicates
+entered at three points - identical candidates, concentric candidates sharing a
+midline, and coincident graph edges produced by splitting overlapping
+candidates at tees - and a run's own address dropped its width, so two
+different runs could collide on one id.  All four are now closed, and
+reconciliation is a gate rather than a note.
+
+**Scale.** The sheet's note reads `SKALA A1 (A3) 1:50 (1:100)`.  Two separate
+things were wrong.  The colon is set as two zero-width vertical hairlines, and
+the stacked-part merge tested horizontal alignment as a ratio of the narrower
+part's width - undefined at zero - so it silently rejected every such pair and
+the note read `1..50`.  Then, with the colon recovered, the note offers two
+ratios, which is not a contradiction: it is one drawing issued at two sheet
+sizes.  The sheet measures 841.0 x 594.1 mm, which is A1, and the note pairs
+`A1 (A3)` with `1:50 (1:100)`, so the sheet selects its own ratio.
+
+Fixing the colon also fixed the lettering: `S3-98` had been a misreading of
+`S3-R8`.
+
+**Designations.**  Emission was unconditional and confirmation needed no pipe.
+Text now tops out at DESIGNATION_CANDIDATE on its own evidence; only the
+association stage, working from geometry, can promote it, and only when the
+label points at its pipe - by a leader, or by being set along the pipe's axis.
+Proximity confirms nothing, because proximity is what puts a note beside
+whatever runs past it.
+
+**Pipe geometry.**  Detection took whatever the text stages left over, so the
+architectural wall layer paired into 160 mm "pipes".  Roles are now classified
+from layer signatures - never from layer *names* - and the discriminator that
+does the work is connectivity: wall strokes never join end to end
+(chainFraction 0.00) while pipe layers chain at 0.88.
+
+## Blind run against the facit
+
+Run blind, then compared - never the other way round.  The facit is the manual
+Bluebeam take-off of the same sheet.
+
+```
+truePositives 4   falsePositives 6   falseNegatives 5
+precision 0.40    recall 0.44        f1 0.42
+```
+
+Exact matches on designation *and* nominal size: `S1-P2-75`, `S3-R8-75`,
+`S3-R8-110`, `S3-R8-160`.
+
+Missed entirely: `KV1-X31-16`, `KV2-X31-16`, `VV1-X31-16`, `S1-P2-110`,
+`S3-P2-160`.
+
+Reported but not in the facit: `ENL. PM-2`, one string with unresolved
+characters, and four partial readings - `S1-P2` and `S3-R8` without their size
+suffix, which are the same labels found twice with the stacked size line
+missed.
+
+**The most useful number in the whole comparison is a length.**  For system
+S3-R8 the engine reports 26.1 m at DN 110 and 54.7 m at DN 75; the facit says
+59.8 m and 21.3 m.  Individually both are badly wrong.  Together they are
+80.8 m against 81.1 m - **0.3 m, or 0.4 %, apart**.
+
+The geometry is right and the measurement is right.  What is wrong is which
+size each run was attributed to: the two are very nearly swapped.  That places
+the remaining error squarely in designation-to-run association, not in
+detection, not in the scale, and not in measurement - which is a much smaller
+and much better-defined problem than the one this rebuild started from.
+
+## What is still wrong
+
+* **Association is weak.**  Only 17 of 215 physical pipes carry a designation.
+  The geometry is found and measured; most of it is reported unnamed.  That is
+  the honest state - an unnamed pipe is a real pipe with no evidence tying it
+  to a label - but it is the largest remaining gap between this and a manual
+  take-off.
+* **Two false confirmations remain**: `ENL. PM-2` and one string containing
+  unresolved characters.  Both have a leader that lands on a pipe, so the
+  present evidence model cannot tell them from a designation.
+* **386 of 4 789 glyphs are unresolved** (8 %), and some resolved characters
+  are still wrong.
+* **The role classifier's WALL and TEXT signatures are unreliable** on this
+  sheet and deliberately excluded from the exclusion set; only REFERENCE_LINE,
+  GRID, HATCH and panel roles gate detection today.
+* **The 20 synthetic drawings A-T and gates G1-G16 are not built.**  Two
+  fixture drawings and 107 tests stand in for them.
