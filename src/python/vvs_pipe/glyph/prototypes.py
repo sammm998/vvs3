@@ -16,6 +16,17 @@ drawing might contain; a drawing with entirely new codes needs no change.
 
 Embedded fonts are usually *subsets* holding only the characters the file's
 real text layer used, so the base-14 bank still covers everything else.
+
+That limit is worth stating plainly, because it bounds how much the embedded
+source can help.  On the reference sheet the embedded ISOCPEUR subset maps
+exactly ``-.0124579ABELMNP``: the drawing's *lettering* was exported as
+outlines rather than as text, so the characters that appear only in the
+lettering - K, V, X, Y among them - were never added to the subset and cannot
+be rendered from it at any size.  The glyph program may still contain them, but
+without a cmap entry there is no way to know which glyph index is which
+character, and guessing would be exactly the kind of invention this engine does
+not do.  Those characters therefore fall back to base-14 shapes, and the K/X
+and V/Y confusions on that sheet are a consequence.
 """
 
 from __future__ import annotations

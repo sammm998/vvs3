@@ -42,7 +42,17 @@ LEADER_HIT_WIDTH_FACTOR = 0.75  # a leader points at the pipe *wall*, not its ax
 LEADER_SUFFICIENT_SCORE = 0.50
 NEUTRAL_EVIDENCE = 0.5
 CONFLICTING_SIZE_SCORE = 0.2
+# How far a run's measured width may sit from the size its label states before
+# the two are treated as describing different pipes.  Generous, because a drawn
+# width is measured through the scale and a nominal size is not an outside
+# diameter; anything past it is a disagreement no tolerance explains.
+SIZE_CONFLICT_RELATIVE = 0.30
 PROXIMITY_RADIUS_CAP_FACTOR = 9.0
+# Half-weight distance for an inline label, in cap heights.  Measured on real
+# lettering: a label beside its pipe sits nearer than one cap height from the
+# axis, so credit has to fall away over that scale rather than over the whole
+# search radius.
+INLINE_CAPS = 1.2
 SCORE_TIE_EPSILON = 0.06
 MIN_DIRECT_SCORE = 0.40
 WIDTH_RELATIVE_TOLERANCE = 0.12
@@ -99,6 +109,9 @@ def associate_designations(
     for d in labels:
         anchor = d.bbox.center
         scored: list[tuple[float, int, tuple[tuple[str, float], ...]]] = []
+        scored_callout: list[tuple[float, int, tuple[tuple[str, float], ...]]] = []
+        scored_inline: list[tuple[float, int, tuple[tuple[str, float], ...]]] = []
+        leader_landed = False
         for ri in index.query_box(d.bbox.expanded(radius)):
             run = runs[ri]
             evidence: list[tuple[str, float]] = []
@@ -107,6 +120,15 @@ def associate_designations(
                 continue
             prox_score = max(0.0, 1.0 - proximity / radius)
             evidence.append(("proximity", qs(prox_score)))
+            # Closeness measured in the drawing's own text size rather than as
+            # a fraction of the search radius.  These are two different
+            # questions: "is this label in the neighbourhood" and "is this
+            # label sitting on this pipe", and only the second identifies an
+            # inline label.  Measured on real lettering, an inline label's
+            # centre is under one cap height from the axis while a callout sits
+            # several away, so credit falls off over that scale.
+            inline_score = 1.0 / (1.0 + (proximity / max(INLINE_CAPS * text_cap_height, 1e-6)) ** 2)
+            evidence.append(("inline", qs(inline_score)))
 
             # A leader is drawn to the pipe's *wall*, so the tolerance has to
             # grow with the drawn width; measuring to the axis and demanding a
@@ -137,23 +159,74 @@ def associate_designations(
             evidence.append(("orientation", qs(orient_score)))
 
             size_score = NEUTRAL_EVIDENCE
+            size_conflict = False
             measured = diameter_of_run.get(run.pipe_run_id)
             if d.diameter_mm is not None and measured is not None:
                 rel = abs(measured - d.diameter_mm) / max(d.diameter_mm, 1e-6)
-                size_score = 1.0 if rel <= 0.15 else CONFLICTING_SIZE_SCORE
+                size_conflict = rel > SIZE_CONFLICT_RELATIVE
+                size_score = CONFLICTING_SIZE_SCORE if size_conflict else 1.0
             evidence.append(("sizeConsistency", qs(size_score)))
 
-            score = (
+            # Drawings label pipes in two quite different ways, and each is a
+            # complete argument in its own right rather than a term in one
+            # blended sum.
+            #
+            # A *callout* stands off from the pipe and is joined to it by a
+            # leader; the leader carries the identification and the label may
+            # be many cap heights away.
+            #
+            # An *inline label* is written on the pipe with no leader at all.
+            # This is the majority on a real sheet, and the old scheme could
+            # not accept any of them: with the leader term at zero, nothing
+            # else could reach the threshold, so 110 correctly read labels were
+            # discarded for NO_ASSOCIATION_EVIDENCE while sitting a fraction of
+            # a cap height from the pipe they named.
+            #
+            # Taking the stronger of the two arguments keeps the callout path
+            # exactly as it was.  What stops the inline path from degenerating
+            # into "nearest wins" is the tie test below: two runs equally close
+            # leave the label AMBIGUOUS rather than bound to whichever sorted
+            # first.
+            callout = (
                 0.50 * leader_score
                 + 0.25 * prox_score
                 + 0.10 * orient_score
                 + 0.15 * size_score
             )
+            # A label that states its own nominal size and a run that was
+            # measured are two numbers the drawing supplied about the same
+            # thing.  When they contradict each other, binding them asserts
+            # something the drawing does not say - a label reading "-110" bound
+            # to a run measured at 533 mm is simply the wrong pipe - so the
+            # inline argument is withdrawn entirely rather than merely
+            # discounted.  A leader is exempt: there the drawing has stated the
+            # pairing explicitly, and the disagreement is a dimension question
+            # for the dimension stage to report, not grounds to discard it.
+            inline = (
+                0.0
+                if size_conflict
+                else 0.55 * inline_score + 0.15 * orient_score + 0.30 * size_score
+            )
+            scored_callout.append((callout, ri, tuple(evidence)))
+            scored_inline.append((inline, ri, tuple(evidence)))
+            score = callout  # replaced below once the label's leaders are known
             if leader_score >= LEADER_SUFFICIENT_SCORE:
                 # A leader that lands on the pipe is direct evidence; it stands
                 # on its own even when the corroborating signals are silent.
                 score = max(score, MIN_DIRECT_SCORE + 0.5 * leader_score)
-            scored.append((score, ri, tuple(evidence)))
+                scored_callout[-1] = (score, ri, tuple(evidence))
+            if leader_score > 0.0:
+                leader_landed = True
+
+        # A drawn leader is the drawing saying which pipe it means.  Once one
+        # has landed, a neighbouring pipe that the label happens to lie near is
+        # not a competing claim, so the inline argument is not offered at all -
+        # without this, a callout standing close to an unrelated pipe reports
+        # COMPETING_PIPES and loses an association the drawing stated plainly.
+        scored = scored_callout if leader_landed else [
+            max(pair, key=lambda t: t[0])
+            for pair in zip(scored_callout, scored_inline)
+        ]
 
         scored.sort(key=lambda t: (-qs(t[0]), runs[t[1]].canonical_key()))
         if not scored or scored[0][0] < MIN_DIRECT_SCORE:

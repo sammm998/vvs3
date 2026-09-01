@@ -9,10 +9,15 @@ than a property.  This test walks the closure and proves it.
 from __future__ import annotations
 
 import ast
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+# The package under test, as the repository lays it out.
+SRC = Path(__file__).resolve().parents[2] / "src" / "python"
 
 ENGINE_ROOT = Path(__file__).resolve().parents[2] / "src" / "python"
 PACKAGE = "vvs_pipe"
@@ -97,14 +102,27 @@ def test_the_cli_only_reaches_the_evaluator_lazily():
 
 
 def test_importing_the_pipeline_does_not_load_a_spreadsheet_library():
-    for mod in ("openpyxl", "vvs_pipe.evaluation"):
-        sys.modules.pop(mod, None)
-    for mod in [m for m in list(sys.modules) if m.startswith("vvs_pipe")]:
-        sys.modules.pop(mod, None)
-    import vvs_pipe.pipeline  # noqa: F401
+    """A fresh interpreter, not this one.
 
-    assert "openpyxl" not in sys.modules
-    assert "vvs_pipe.evaluation" not in sys.modules
+    Evicting ``vvs_pipe`` from ``sys.modules`` in-process and re-importing gives
+    a second generation of every class in the package, so a later test holding a
+    first-generation enum finds that ``x is SomeEnum.VALUE`` is false against an
+    object from the second - which silently turns assertions in unrelated tests
+    into passes.  A subprocess also makes the claim stronger: the import is
+    measured from nothing, rather than from whatever this session had already
+    loaded.
+    """
+    source = "import sys; import vvs_pipe.pipeline; print(' '.join(sorted(sys.modules)))"
+    proc = subprocess.run(
+        [sys.executable, "-c", source],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "PYTHONPATH": str(SRC)},
+    )
+    loaded = set(proc.stdout.split())
+    assert "openpyxl" not in loaded
+    assert "vvs_pipe.evaluation" not in loaded
 
 
 def test_blind_analysis_records_that_no_facit_was_used(analysis_a):

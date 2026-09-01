@@ -22,9 +22,17 @@ from ..states import IdentityState, Reason, worst
 def aggregate_quantities(pipes: Sequence[PhysicalPipe]) -> tuple[QuantityRow, ...]:
     groups: dict[tuple, list[PhysicalPipe]] = {}
     for p in canonical_sort(list(pipes), key=lambda p: p.canonical_key()):
+        # A row is "how much of this designation, at this nominal size".  When
+        # the label states its size, that is the size of the row: splitting one
+        # stated size across every width the geometry happened to measure would
+        # assert several different pipe sizes for a label that names one, and on
+        # a real sheet it turned a single S3-R8-75 into three rows at 61.4, 63.5
+        # and 75 mm.  Any disagreement between the two is still reported, per
+        # pipe, by the dimension stage - it just does not fragment the take-off.
+        size = p.nominal_diameter_mm if p.nominal_diameter_mm is not None else p.diameter_mm
         key = (
             p.designation or "",
-            ql(p.diameter_mm) if p.diameter_mm is not None else -1.0,
+            ql(size) if size is not None else -1.0,
             p.identity_state.value,
         )
         groups.setdefault(key, []).append(p)
@@ -33,7 +41,7 @@ def aggregate_quantities(pipes: Sequence[PhysicalPipe]) -> tuple[QuantityRow, ..
     for key in sorted(groups):
         members = groups[key]
         designation = members[0].designation
-        diameter = members[0].diameter_mm
+        diameter, size_disagreement = _row_diameter(members)
         horiz = [m.horizontal_length_m for m in members]
         vert = [m.vertical_length_m for m in members]
         total = [m.total_length_m for m in members]
@@ -42,6 +50,9 @@ def aggregate_quantities(pipes: Sequence[PhysicalPipe]) -> tuple[QuantityRow, ..
         for m in members:
             state = worst(state, m.identity_state)
             reasons.update(m.reasons)
+        if size_disagreement:
+            reasons.add(Reason.DIMENSION_CONFLICT)
+            state = worst(state, IdentityState.AMBIGUOUS)
         rows.append(
             QuantityRow(
                 designation=designation,
@@ -66,3 +77,26 @@ def aggregate_quantities(pipes: Sequence[PhysicalPipe]) -> tuple[QuantityRow, ..
             )
         )
     return tuple(canonical_sort(rows, key=lambda r: r.canonical_key()))
+
+
+def _row_diameter(members: Sequence[PhysicalPipe]) -> tuple[float | None, bool]:
+    """The size to publish for a row, and whether its members disagreed.
+
+    The resolved diameter already embodies the label-versus-measurement
+    reconciliation, and where the members agree it is simply reported: a code
+    like ``VS1-S13`` carries a "13" that is part of the system name rather than
+    a size, and the drawn width is what corrects it.
+
+    Where the members *disagree* - the same stated size measured at several
+    different widths - reporting any one of them would pick a winner the
+    evidence does not support, so the stated size is published and the row is
+    marked with a dimension conflict.  What is not done is splitting the row:
+    that would assert several pipe sizes for a label naming one.
+    """
+    resolved = sorted({ql(m.diameter_mm) for m in members if m.diameter_mm is not None})
+    nominal = members[0].nominal_diameter_mm
+    if len(resolved) == 1:
+        return resolved[0], False
+    if not resolved:
+        return nominal, False
+    return (nominal if nominal is not None else resolved[0]), True

@@ -8,8 +8,11 @@ without any rule reading a layer's name.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
+from vvs_pipe.association import associate_designations
 from vvs_pipe.canonical import entity_id
 from vvs_pipe.designations.promote import promote_designations
 from vvs_pipe.geometry.primitives import BBox
@@ -25,6 +28,7 @@ from vvs_pipe.model import (
     GlyphCandidate,
     PhysicalPipe,
     PipeCandidate,
+    PipeRun,
     Provenance,
     TextItem,
     TokenStructure,
@@ -433,3 +437,79 @@ def test_role_classification_does_not_depend_on_object_order():
     forward = classify_roles(objects, box, 7.0)
     reverse = classify_roles(list(reversed(objects)), box, 7.0)
     assert forward.to_canonical() == reverse.to_canonical()
+
+
+# ----------------------------------------------------------- association paths
+
+
+def _run(points, run_id, width=None):
+    return PipeRun(
+        pipe_run_id=run_id,
+        page=1,
+        centerline=tuple(points),
+        edge_ids=(),
+        source_object_ids=(),
+        width_pt=width,
+        style="dashed_line" if width is None else "double_line",
+        direction="horizontal",
+        designation_candidates=(),
+        dimension_candidates=(),
+        vertical_transition_ids=(),
+        state=IdentityState.HIGH_CONFIDENCE,
+        reasons=(),
+        confidence=Confidence(geometry=0.9, topology=0.9),
+        provenance=Provenance(stage="test", rule="fixture"),
+    )
+
+
+def _label(text, x0, y0, diameter=None, did="des1"):
+    d = _designation(text, did=did)
+    return replace(
+        d,
+        bbox=BBox(x0, y0, x0 + 30.0, y0 + 7.0),
+        diameter_mm=diameter,
+    )
+
+
+def test_an_inline_label_with_no_leader_still_names_its_pipe():
+    """The failure that discarded 110 correctly read labels on the real sheet.
+
+    Most pipe labels on a real drawing have no leader at all: they are written
+    on the pipe.  A scheme that only accepts leaders names almost nothing.
+    """
+    run = _run([(0.0, 0.0), (400.0, 0.0)], "run1")
+    label = _label("S3-R8-75", 100.0, 1.0, diameter=75.0)
+    result = associate_designations([label], [run], {}, {"run1": None}, 7.0)
+    assert result.assignments["run1"].designation == "S3-R8-75"
+
+
+def test_a_label_several_cap_heights_away_with_no_leader_names_nothing():
+    run = _run([(0.0, 0.0), (400.0, 0.0)], "run1")
+    label = _label("S3-R8-75", 100.0, 40.0, diameter=75.0)  # ~5.7 caps off
+    result = associate_designations([label], [run], {}, {"run1": None}, 7.0)
+    assert not [a for a in result.assignments.values() if a.designation]
+
+
+def test_a_stated_size_contradicting_the_drawn_width_blocks_an_inline_binding():
+    """A label reading -110 bound to a run measured at 533 mm is the wrong pipe."""
+    run = _run([(0.0, 0.0), (400.0, 0.0)], "run1", width=30.0)
+    label = _label("S3-R8-110", 100.0, 1.0, diameter=110.0)
+    agreeing = associate_designations([label], [run], {}, {"run1": 110.0}, 7.0)
+    assert agreeing.assignments["run1"].designation == "S3-R8-110"
+
+    conflicting = associate_designations([label], [run], {}, {"run1": 533.0}, 7.0)
+    assert not [a for a in conflicting.assignments.values() if a.designation]
+
+
+def test_two_pipes_equally_close_to_an_inline_label_leave_it_ambiguous():
+    """The inline path must not degenerate into "nearest wins"."""
+    from vvs_pipe.association import associate_designations
+    # Close enough to either that both clear the acceptance threshold, and
+    # exactly equidistant, so the only thing that could separate them is an
+    # arbitrary tie-break.
+    a = _run([(0.0, 4.0), (400.0, 4.0)], "runA")
+    b = _run([(0.0, -4.0), (400.0, -4.0)], "runB")
+    label = _label("S3-R8-75", 100.0, -3.5, diameter=75.0)
+    result = associate_designations([label], [a, b], {}, {"runA": None, "runB": None}, 7.0)
+    assert not [x for x in result.assignments.values() if x.designation]
+    assert any(code == Reason.COMPETING_PIPES.value for _id, code in result.diagnostics)

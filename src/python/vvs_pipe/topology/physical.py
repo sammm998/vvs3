@@ -39,6 +39,11 @@ class RunAssignment:
     reasons: tuple[Reason, ...]
     association_confidence: float
     evidence: tuple[tuple[str, float], ...]
+    # The size the *label* states, kept apart from the size the geometry was
+    # measured at.  They are different facts about the same pipe and the
+    # quantity list needs the first; the dimension stage reports the second and
+    # any disagreement between them.
+    label_diameter_mm: float | None = None
 
 
 def build_physical_pipes(
@@ -97,6 +102,7 @@ def build_physical_pipes(
         present = [a for a in assigns if a is not None]
         designation = present[0].designation if present and present[0].designation else None
         diameter = present[0].diameter_mm if present else None
+        nominal = present[0].label_diameter_mm if present else None
         designation_ids = tuple(sorted({d for a in present for d in a.designation_ids}))
         state = IdentityState.HIGH_CONFIDENCE
         reasons: list[Reason] = []
@@ -163,6 +169,7 @@ def build_physical_pipes(
                 total_length_m=None if total_m is None else ql(total_m),
                 length_pt=ql(length_pt),
                 diameter_mm=diameter,
+                nominal_diameter_mm=nominal,
                 designation=designation,
                 designation_ids=designation_ids,
                 vertical_ids=tuple(sorted(vertical_ids)),

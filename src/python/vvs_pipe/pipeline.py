@@ -418,6 +418,7 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
                 reasons=(Reason.NO_DESIGNATION,) + dim.reasons,
                 association_confidence=0.0,
                 evidence=(("dimensionConfidence", qs(dim.confidence)),),
+                label_diameter_mm=label_of_run.get(r.pipe_run_id),
             )
         else:
             resolved[r.pipe_run_id] = RunAssignment(
@@ -428,6 +429,7 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
                 reasons=tuple(sorted(set(a.reasons + dim.reasons), key=lambda x: x.value)),
                 association_confidence=a.association_confidence,
                 evidence=a.evidence + (("dimensionConfidence", qs(dim.confidence)),),
+                label_diameter_mm=label_of_run.get(r.pipe_run_id),
             )
 
     pipes = build_physical_pipes(runs, resolved, page, mpp, verticals.by_run)

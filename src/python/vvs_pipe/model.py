@@ -595,6 +595,8 @@ class PhysicalPipe:
     confidence: Confidence
     evidence: tuple[tuple[str, float], ...]
     provenance: Provenance
+    # What the label said, as distinct from what the drawing measured.
+    nominal_diameter_mm: float | None = None
 
     def canonical_key(self) -> tuple:
         return (self.page, tuple(sorted(polyline_key(p) for p in self.centerline)))
@@ -611,6 +613,9 @@ class PhysicalPipe:
             "verticalLengthM": ql(self.vertical_length_m) if self.vertical_length_m is not None else None,
             "totalLengthM": ql(self.total_length_m) if self.total_length_m is not None else None,
             "diameterMm": ql(self.diameter_mm) if self.diameter_mm is not None else None,
+            "nominalDiameterMm": (
+                None if self.nominal_diameter_mm is None else ql(self.nominal_diameter_mm)
+            ),
             "designation": self.designation,
             "designationIds": sorted(self.designation_ids),
             "verticalIds": sorted(self.vertical_ids),
