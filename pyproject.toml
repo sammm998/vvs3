@@ -28,6 +28,6 @@ package-dir = {"" = "src/python"}
 where = ["src/python"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/python"]
+testpaths = ["tests/python", "tests/pdf_forensics"]
 pythonpath = ["src/python", "."]
 addopts = "-q -p no:warnings"

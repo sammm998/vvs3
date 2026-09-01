@@ -26,6 +26,23 @@ engine over two drawings with disjoint code sets, and it parses every engine
 module's AST to prove no executable string constant is shaped like a drawing
 code.
 
+## `pdf_forensics/` - the forensic engine
+
+A second, self-contained engine that starts from the PDF itself rather than
+from a detector: it builds a searchable representation of every object, glyph,
+path and transform in the file, then answers the take-off with thousands of
+local geometric searches, each of which records why it believes what it says.
+
+```bash
+python -m pdf_forensics.inspect sheet.pdf                    # what is in the file
+python -m pdf_forensics.analyze sheet.pdf --out artifacts/run
+python -m pdf_forensics.inspect_region sheet.pdf --near 412 380 --radius 60
+python -m pdf_forensics.search  sheet.pdf --text "S3-98"
+```
+
+See `docs/PDF_FORENSICS.md` for the stages, the rules the tests enforce, the
+acceptance run and the limitations.
+
 ## Layout
 
 ```
