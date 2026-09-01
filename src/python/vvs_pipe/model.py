@@ -236,6 +236,7 @@ class VectorDocument:
     text_spans: list[TextSpan]
     excluded_annotation_objects: int
     excluded_annotation_spans: int
+    embedded_fonts: tuple[tuple[str, bytes], ...] = ()
 
     def objects_on(self, page: int) -> list[VectorObject]:
         return [o for o in self.objects if o.page == page]

@@ -26,6 +26,7 @@ from ..canonical import canonical_sort, entity_id, qs
 from ..geometry.primitives import BBox
 from ..glyph.alphabet import AlphabetAssignment, GlyphObservation, resolve_alphabet
 from ..glyph.candidates import GlyphSegmentation, TextLine
+from ..glyph.prototypes import Prototype
 from ..glyph.features import glyph_features, rasterise_polylines
 from ..model import GlyphCandidate, Provenance, TextItem, TextSpan
 from ..states import IdentityState, Reason
@@ -134,6 +135,7 @@ def reconstruct_text(
     segmentation: GlyphSegmentation,
     spans: Sequence[TextSpan],
     page: int,
+    bank: Sequence[Prototype] | None = None,
 ) -> ReconstructedText:
     multi: list[GlyphObservation] = []
     single: list[GlyphObservation] = []
@@ -141,7 +143,7 @@ def reconstruct_text(
         target = multi if len(line.glyphs) >= 2 else single
         for g in line.glyphs:
             target.append(_observation(line, g))
-    assignment = resolve_alphabet(multi, single)
+    assignment = resolve_alphabet(multi, single, bank)
 
     glyph_candidates: list[GlyphCandidate] = []
     items: list[TextItem] = []

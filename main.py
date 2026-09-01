@@ -28,6 +28,7 @@ import json
 import mimetypes
 import os
 import queue
+import subprocess
 import sys
 import threading
 import traceback
@@ -44,6 +45,10 @@ WEB_ROOT = ROOT / "web"
 DIST_UI = ROOT / "dist" / "ui"
 MAX_UPLOAD_BYTES = int(os.environ.get("VVS_MAX_UPLOAD_BYTES", 128 * 1024 * 1024))
 ARTIFACTS = ("analysis.json", "forensics.json", "marked.pdf", "debug.pdf", "quantities.csv")
+WORKER = ROOT / "worker.py"
+# A restart must not re-run a job for ever: an analysis that reliably kills
+# the container would otherwise take the service down every time it came up.
+MAX_ATTEMPTS = int(os.environ.get("VVS_MAX_ATTEMPTS", 2))
 
 ENGINE_ERROR: str | None = None
 
@@ -66,7 +71,10 @@ def _load_job(job_id: str) -> dict | None:
             return dict(_jobs[job_id])
     path = _job_dir(job_id) / "job.json"
     if path.exists():
-        job = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return None
         with _jobs_lock:
             _jobs[job_id] = job
         return dict(job)
@@ -78,7 +86,12 @@ def _save_job(job: dict) -> None:
         _jobs[job["id"]] = dict(job)
     d = _job_dir(job["id"])
     d.mkdir(parents=True, exist_ok=True)
-    (d / "job.json").write_text(json.dumps(job, indent=2), encoding="utf-8")
+    # Written through a temporary file: a container killed mid-write would
+    # otherwise leave truncated JSON, and every later read of that job would
+    # fail in a way that looks nothing like the original problem.
+    tmp = d / "job.json.tmp"
+    tmp.write_text(json.dumps(job, indent=2), encoding="utf-8")
+    tmp.replace(d / "job.json")
 
 
 def _progress(job_id: str, stage: str) -> None:
@@ -106,42 +119,128 @@ def _worker() -> None:
 
 
 def _run_job(job_id: str) -> None:
-    from vvs_pipe.cli import _write_quantities_csv
-    from vvs_pipe.pipeline import analyse
-    from vvs_pipe.rendering import render_debug, render_marked
+    """Run one analysis in a child process and mirror its progress into the job.
 
+    Everything the child says arrives as it happens, so a job that is slow and a
+    job that is wedged look different from the outside, and a child that is
+    killed outright still leaves a job marked failed with its last stage and its
+    exit signal recorded.
+    """
     job = _load_job(job_id)
     if not job:
         return
-    job["state"] = "running"
-    _save_job(job)
     directory = _job_dir(job_id)
+    job["state"] = "running"
+    job["startedAt"] = _now()
+    job["attempts"] = int(job.get("attempts", 0)) + 1
+    job["error"] = None
+    _save_job(job)
 
-    _progress(job_id, "forensics and vector extraction")
-    result = analyse(directory / "input.pdf", blind=True)
-    _progress(job_id, "writing forensic report")
-    result.forensics.write(directory / "forensics.json")
-    _progress(job_id, "writing analysis")
-    result.write_json(directory / "analysis.json")
-    _progress(job_id, "rendering marked drawing")
-    render_marked(result, directory / "marked.pdf")
-    if os.environ.get("RUN_FORENSICS") == "1":
-        _progress(job_id, "rendering debug drawing")
-        render_debug(result, directory / "debug.pdf")
-    _progress(job_id, "writing quantities")
-    _write_quantities_csv(result, directory / "quantities.csv")
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    proc = subprocess.Popen(
+        [sys.executable, str(WORKER), str(directory)],
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    stderr_tail: list[str] = []
+    stderr_thread = threading.Thread(
+        target=_drain, args=(proc.stderr, stderr_tail), daemon=True
+    )
+    stderr_thread.start()
+
+    results: dict[str, str] = {}
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip("\n")
+        sys.stdout.write(f"[{job_id}] {line}\n")
+        sys.stdout.flush()
+        if not line.startswith("@@"):
+            continue
+        kind, _, text = line[2:].partition(" ")
+        if kind == "STAGE":
+            _progress(job_id, text)
+        elif kind == "ALIVE":
+            _heartbeat(job_id, text)
+        elif kind == "RESULT":
+            name, _, value = text.partition(" ")
+            results[name] = value
+    code = proc.wait()
+    stderr_thread.join(timeout=5)
 
     job = _load_job(job_id) or job
-    job["state"] = "succeeded"
+    if code == 0:
+        job["state"] = "succeeded"
+        job["analysisStatus"] = results.get("status")
+        job["canonicalDigest"] = results.get("digest")
+        job["reconciled"] = results.get("reconciled") == "yes"
+    else:
+        job["state"] = "failed"
+        # A negative code is a signal: the usual one here is the platform's
+        # out-of-memory killer, which leaves no traceback at all, so say plainly
+        # that the child was killed rather than reporting an empty error.
+        detail = "".join(stderr_tail)[-4000:]
+        if code < 0:
+            detail = f"the analysis process was killed by signal {-code}\n{detail}"
+        job["error"] = detail or f"the analysis process exited with code {code}"
+    job["exitCode"] = code
     job["finishedAt"] = _now()
-    job["canonicalDigest"] = result.canonical_digest()
-    job["reconciled"] = result.reconciliation.ok
     job["artifacts"] = {
         name: f"/api/jobs/{job_id}/artifacts/{name}"
         for name in ARTIFACTS
         if (directory / name).exists()
     }
     _save_job(job)
+
+
+def _drain(stream, sink: list[str]) -> None:
+    try:
+        for line in stream:
+            sink.append(line)
+            del sink[:-200]
+            sys.stderr.write(line)
+    except Exception:  # pragma: no cover - the pipe closing is not an error
+        pass
+
+
+def _heartbeat(job_id: str, seconds: str) -> None:
+    job = _load_job(job_id)
+    if not job:
+        return
+    job["aliveAt"] = _now()
+    job["elapsedSeconds"] = seconds
+    _save_job(job)
+
+
+def _recover_interrupted() -> list[str]:
+    """Re-queue jobs a previous container died in the middle of.
+
+    Without this a restart - a deploy, a health-check timeout, an out-of-memory
+    kill - leaves the job file saying ``queued`` or ``running`` for ever while
+    nothing is working on it.  That is indistinguishable, from the browser, from
+    an upload that was never accepted.
+    """
+    recovered: list[str] = []
+    for job in _list_jobs():
+        if job.get("state") not in ("queued", "running"):
+            continue
+        if int(job.get("attempts", 0)) >= MAX_ATTEMPTS:
+            job["state"] = "failed"
+            job["error"] = (
+                f"the analysis was interrupted {job.get('attempts')} times "
+                "without finishing; it is not being retried again"
+            )
+            job["finishedAt"] = _now()
+            _save_job(job)
+            continue
+        job["state"] = "queued"
+        _save_job(job)
+        _work.put(job["id"])
+        recovered.append(job["id"])
+    return recovered
 
 
 def _submit(file_name: str, payload: bytes) -> dict:
@@ -163,10 +262,13 @@ def _submit(file_name: str, payload: bytes) -> dict:
         "fileName": file_name,
         "state": "queued",
         "createdAt": _now(),
+        "startedAt": None,
         "finishedAt": None,
+        "attempts": 0,
         "progress": [],
         "error": None,
         "artifacts": {},
+        "bytes": len(payload),
     }
     _save_job(job)
     _work.put(job_id)
@@ -223,6 +325,7 @@ class Handler(BaseHTTPRequestHandler):
                     "queued": _work.qsize(),
                     "engineError": ENGINE_ERROR,
                     "storage": str(STORAGE),
+                    "worker": WORKER.exists(),
                 },
             )
             return
@@ -287,6 +390,10 @@ def main() -> int:
         sys.stderr.write("Uploads will fail until requirements.txt is installed.\n")
 
     threading.Thread(target=_worker, name="vvs-worker", daemon=True).start()
+
+    recovered = _recover_interrupted()
+    if recovered:
+        sys.stdout.write(f"re-queued {len(recovered)} interrupted job(s): {', '.join(recovered)}\n")
 
     # PaaS platforms inject the port to listen on.  When they do not, 8080 is
     # the conventional default and is what the platform's generated domain

@@ -29,7 +29,8 @@ from .designations import detect_panels, discover_designations
 from .dimensions import resolve_diameter
 from .geometry.primitives import BBox, Segment
 from .glyph import segment_glyphs
-from .measurement import aggregate_quantities, detect_scale
+from .glyph.prototypes import combined_bank, embedded_prototypes
+from .measurement import aggregate_quantities, infer_scale
 from .model import (
     Designation,
     GlyphCandidate,
@@ -43,8 +44,8 @@ from .model import (
     VerticalSegment,
 )
 from .pdf_forensics import ForensicReport, forensic_report
-from .pipes import detect_pipes, reconstruct_dashes, single_line_candidates
-from .states import IdentityState, Reason, ScaleState
+from .pipes import dedupe_candidates, detect_pipes, reconstruct_dashes, single_line_candidates
+from .states import AnalysisStatus, IdentityState, Reason, ScaleState
 from .text_reconstruction import reconstruct_text
 from .topology import build_graph, build_physical_pipes, build_runs
 from .topology.graph_build import PipeGraph
@@ -84,10 +85,32 @@ class AnalysisResult:
     reconciliation: ReconciliationReport
     blind: bool
 
+    # ------------------------------------------------------------ hard gate
+    @property
+    def status(self) -> AnalysisStatus:
+        """Whether this run may be read as a quantity take-off.
+
+        Reconciliation is a gate, not a note.  If a metre is counted twice or a
+        run belongs to two pipes, an internal invariant has broken and nothing
+        downstream can be trusted, so the whole run is INVALID - the numbers are
+        still published, because hiding them would hide the defect, but they are
+        published as broken.  A run whose invariants hold but which could not be
+        measured (no scale, say) is INCOMPLETE, not INVALID: the engine did its
+        job and the drawing did not supply what was needed.
+        """
+        if not self.reconciliation.ok:
+            return AnalysisStatus.INVALID
+        if any(p.scale.metres_per_point is None for p in self.pages):
+            return AnalysisStatus.INCOMPLETE
+        if any(q.total_m is None for q in self.quantities):
+            return AnalysisStatus.INCOMPLETE
+        return AnalysisStatus.VALID
+
     # ---------------------------------------------------------------- output
     def to_canonical(self) -> dict[str, Any]:
         return {
             "schema": SCHEMA,
+            "analysisStatus": self.status.value,
             "drawing": {
                 "file": self.document.source_name,
                 "pdfSha256": self.document.sha256,
@@ -173,9 +196,12 @@ def analyse_extracted(
     same document with its object list permuted and compare canonical digests.
     """
     cfg = cfg or PipelineConfig()
+    # The drawing's own typeface is the best prototype for its own lettering;
+    # rendered once per document and shared by every page.
+    bank = combined_bank(embedded_prototypes(doc.embedded_fonts))
     pages: list[PageResult] = []
     for page_info in doc.pages:
-        pages.append(_analyse_page(doc, page_info.page, page_info, cfg))
+        pages.append(_analyse_page(doc, page_info.page, page_info, cfg, bank))
 
     all_pipes = [pp for p in pages for pp in p.physical_pipes]
     quantities = aggregate_quantities(all_pipes)
@@ -196,7 +222,7 @@ def analyse_extracted(
     )
 
 
-def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig) -> PageResult:
+def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig, bank=None) -> PageResult:
     all_objects = doc.objects_on(page)
     spans = doc.spans_on(page)
     box = BBox(0.0, 0.0, page_info.width, page_info.height)
@@ -220,7 +246,7 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
     caps = sorted(l.cap_height for l in segmentation.lines)
     cap = caps[len(caps) // 2] if caps else 7.0
 
-    text = reconstruct_text(segmentation, spans, page)
+    text = reconstruct_text(segmentation, spans, page, bank)
     panels = detect_panels(objects, text.items, box, page)
     panel_boxes = [p.bbox for p in panels]
 
@@ -241,11 +267,15 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
         if cfg.accept_single_line_pipes
         else ()
     )
-    candidates = tuple(
-        canonical_sort(list(detection.candidates) + list(singles), key=lambda c: c.canonical_key())
+    # Two candidates with the same page, centerline and style are the same
+    # entity under the engine's own content-addressed identity, however many
+    # times the CAD file drew the line.  Collapsing them here is what keeps a
+    # metre from being counted twice and a run from landing in two pipes.
+    candidates, duplicate_candidates, concentric_candidates = dedupe_candidates(
+        list(detection.candidates) + list(singles)
     )
 
-    scale = detect_scale(text.items, objects, box)
+    scale = infer_scale(text.items, objects, box, text.glyphs, cap)
     mpp = scale.metres_per_point
 
     graph = build_graph(candidates, page)
@@ -336,9 +366,15 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
         "dimensionReconciliation": dimension_notes,
         "scaleState": scale.state.value,
         "unresolvedGlyphs": sum(1 for g in text.glyphs if g.character is None),
+        "prototypeBank": {
+            "embedded": sum(1 for p in (bank or ()) if p.source == "embedded"),
+            "total": len(bank or ()),
+        },
         "artworkRegions": [r.to_canonical() for r in artwork_regions],
         "artworkObjectsExcluded": len(artwork_ids),
         "dashReconstruction": dash_diagnostics,
+        "duplicateCandidatesMerged": duplicate_candidates,
+        "concentricCandidatesMerged": concentric_candidates,
     }
 
     return PageResult(

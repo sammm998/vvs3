@@ -18,15 +18,28 @@ drawing says, by exploiting a property of the drawing itself:
    whichever fits it better and the other cluster falls to its next best
    character.
 
-Exclusivity is a statement about the drawing's *alphabet*, not a bijection over
-every shape on the sheet.  A real drawing splits into far more clusters than
-there are characters - 872 against an alphabet of 49 on the reference sheet,
-because the same letter appears at several sizes, weights and rotations - and
-forcing a global one-to-one match there starves the alphabet: 827 of those
-clusters, including a 205-instance ``R``, were left with no character at all.
-So the exclusive match runs over the clusters carrying the most evidence, which
-are the ones that realise the alphabet, and every remaining cluster then takes
-its own best character with duplicates allowed.
+Exclusivity is a *tie-break*, not a bijection.  A real drawing splits into far
+more clusters than there are characters - 421 against an alphabet of 49 on the
+reference sheet, because the same letter appears at several sizes and weights -
+so a one-to-one match cannot even express the truth, and forcing one scatters
+clusters onto characters nowhere near them: it put a 201-instance ``A`` onto
+``O`` with a slash, a character not even in its top five.
+
+So the match is still solved globally - deciding one cluster at a time is what
+turns ``S`` into ``E`` when ``5`` is taken, because the cheapest *free*
+character is not the right one - but every character carries several slots
+instead of one.  A second cluster may take a character already claimed, at a
+penalty:
+
+* two clusters that are the same letter at two sizes each pay the penalty and
+  both keep it, because everything else is much further away;
+* ``S`` and ``5`` do not: the true ``5`` fits ``5`` far better, and the penalty
+  is larger than the gap between ``5`` and ``S`` for the other cluster, so it
+  takes ``S``.
+
+The number of slots follows from the drawing - how many clusters there are per
+character - and a cluster that fits nothing takes none of them and is reported
+UNRESOLVED_GLYPH.
 
 A cluster whose best cost exceeds ``REJECT_COST`` is left unassigned and its
 glyphs are reported UNRESOLVED_GLYPH rather than forced onto a character.
@@ -43,6 +56,7 @@ import numpy as np
 from ..canonical import canonical_sort, qs
 from .classify import glyph_distance_vector
 from .features import GlyphRaster, chamfer, jaccard_distance
+from .prototypes import Prototype
 
 CLUSTER_CHAMFER_MAX = 0.55
 CLUSTER_JACCARD_MAX = 0.22
@@ -51,8 +65,14 @@ CLUSTER_RELHEIGHT_MAX = 0.18
 # same character have almost identical coarse ink distributions.
 SIGNATURE_L1_MAX = 0.35
 REJECT_COST = 3.4
-# How much a maximally-supported cluster's regret is amplified, used only to
-# decide otherwise-tied assignments deterministically by weight of evidence.
+# What a cluster pays to take a character another cluster already holds.  It is
+# larger than the gap a confusable pair leaves behind (S sits 0.32 beyond 5 for
+# the cluster that is really an S) and much smaller than the distance to an
+# unrelated character, so genuine duplicates survive and confusions do not.
+DUPLICATE_PENALTY = 0.45
+MAX_SLOTS_PER_CHARACTER = 12
+# How much a well-supported cluster's regret is amplified, used only to decide
+# otherwise-tied assignments deterministically by weight of evidence.
 REGRET_EVIDENCE_GAIN = 0.05
 
 
@@ -164,6 +184,7 @@ def _assign(
 def resolve_alphabet(
     observations: Sequence[GlyphObservation],
     singletons: Sequence[GlyphObservation] = (),
+    bank: Sequence[Prototype] | None = None,
 ) -> AlphabetAssignment:
     """Resolve the drawing's alphabet.
 
@@ -197,71 +218,57 @@ def resolve_alphabet(
         rep = obs[members[0]]
         rel_h = sum(obs[m].rel_height for m in members) / len(members)
         rel_b = sum(obs[m].rel_base for m in members) / len(members)
-        per_cluster.append(glyph_distance_vector(rep.raster, rel_h, rel_b))
+        per_cluster.append(glyph_distance_vector(rep.raster, rel_h, rel_b, bank))
 
-    chars = sorted({ch for row in per_cluster for ch in row})
-    n_chars = len(chars)
     n_clusters = len(per_cluster)
-
-    # The clusters that realise the alphabet are the ones with the most
-    # evidence behind them; they compete exclusively.  The rest are variants of
-    # the same characters at other sizes, and take their best match directly.
-    order = sorted(range(n_clusters), key=lambda i: (-len(comps[i]), i))
-    competing = sorted(order[:n_chars])
-    competing_pos = {ci: k for k, ci in enumerate(competing)}
-
     character_of: dict[int, str | None] = {}
     confidence_of: dict[int, float] = {}
     ranked_of: dict[int, tuple[tuple[str, float], ...]] = {}
     sizes: dict[int, int] = {i: len(comps[i]) for i in range(n_clusters)}
-
     for i in range(n_clusters):
-        ranked_of[i] = tuple(
-            (c, qs(d)) for c, d in sorted(per_cluster[i].items(), key=lambda kv: (kv[1], kv[0]))[:6]
-        )
+        ranked = sorted(per_cluster[i].items(), key=lambda kv: (kv[1], kv[0]))
+        ranked_of[i] = tuple((c, qs(d)) for c, d in ranked[:6])
 
-    if competing:
-        cost = np.full((len(competing), n_chars + len(competing)), REJECT_COST, dtype=np.float64)
-        for k, ci in enumerate(competing):
-            for j, ch in enumerate(chars):
-                cost[k, j] = per_cluster[ci].get(ch, REJECT_COST)
+    chars = sorted({ch for row in per_cluster for ch in row})
+    n_chars = len(chars)
+    if not n_chars or not n_clusters:
+        return AlphabetAssignment(cluster_of, character_of, confidence_of, ranked_of, sizes)
 
-        # Exact ties are common here and the solver would otherwise break them
-        # arbitrarily.  "Give 1 to the cluster of 369 glyphs and I to the
-        # cluster of one" and its reverse can score exactly the same total, and
-        # picking either at random is the arbitrary tie-break this engine
-        # forbids - with 369 characters riding on it.
-        #
-        # So what is minimised is *regret* - how much worse than its own best
-        # match a cluster is forced to accept - with each cluster's regret
-        # amplified by how much evidence stands behind it.
-        sizes_arr = np.array([len(comps[ci]) for ci in competing], dtype=np.float64)
-        span = math.log1p(float(sizes_arr.max())) if sizes_arr.size else 1.0
-        weight = (np.log1p(sizes_arr) / span) if span > 0 else np.zeros_like(sizes_arr)
-        best_cost = cost[:, :n_chars].min(axis=1) if n_chars else np.zeros(len(competing))
-        regret = cost - best_cost[:, None]
-        scaled = best_cost[:, None] + regret * (1.0 + REGRET_EVIDENCE_GAIN * weight[:, None])
-        rows, cols = linear_sum_assignment(scaled)
-        for k, j in zip(rows.tolist(), cols.tolist()):
-            ci = competing[k]
-            row = per_cluster[ci]
-            if j >= n_chars or cost[k, j] >= REJECT_COST:
-                character_of[ci] = None
-                confidence_of[ci] = 0.0
-                continue
-            ch = chars[j]
-            _assign(character_of, confidence_of, ci, ch, row)
+    # Slots per character: enough for the duplicates this drawing actually has,
+    # bounded so the assignment stays small.
+    slots = max(1, min(MAX_SLOTS_PER_CHARACTER, -(-n_clusters // n_chars) + 1))
 
-    for ci in range(n_clusters):
-        if ci in competing_pos:
+    cost = np.full((n_clusters, n_chars * slots + n_clusters), REJECT_COST, dtype=np.float64)
+    for i, row in enumerate(per_cluster):
+        for j, ch in enumerate(chars):
+            base = row.get(ch, REJECT_COST)
+            for k in range(slots):
+                cost[i, k * n_chars + j] = base + k * DUPLICATE_PENALTY
+
+    # Exact ties are common and the solver would otherwise break them
+    # arbitrarily - with hundreds of glyphs riding on the outcome.  What is
+    # minimised is *regret*, how much worse than its own best match a cluster is
+    # forced to accept, amplified by how much evidence stands behind it, so a
+    # tie always falls to the better-supported cluster.
+    sizes_arr = np.array([len(comps[i]) for i in range(n_clusters)], dtype=np.float64)
+    span = math.log1p(float(sizes_arr.max())) if sizes_arr.size else 1.0
+    weight = (np.log1p(sizes_arr) / span) if span > 0 else np.zeros_like(sizes_arr)
+    best_cost = cost[:, : n_chars * slots].min(axis=1)
+    regret = cost - best_cost[:, None]
+    scaled = best_cost[:, None] + regret * (1.0 + REGRET_EVIDENCE_GAIN * weight[:, None])
+    rows, cols = linear_sum_assignment(scaled)
+
+    for i, j in zip(rows.tolist(), cols.tolist()):
+        if j >= n_chars * slots:
+            character_of[i] = None
+            confidence_of[i] = 0.0
             continue
-        row = per_cluster[ci]
-        ranked = sorted(row.items(), key=lambda kv: (kv[1], kv[0]))
-        if not ranked or ranked[0][1] >= REJECT_COST:
-            character_of[ci] = None
-            confidence_of[ci] = 0.0
+        ch = chars[j % n_chars]
+        if per_cluster[i].get(ch, REJECT_COST) >= REJECT_COST:
+            character_of[i] = None
+            confidence_of[i] = 0.0
             continue
-        _assign(character_of, confidence_of, ci, ranked[0][0], row)
+        _assign(character_of, confidence_of, i, ch, per_cluster[i])
 
     # Lone marks: adopt the character of the cluster whose shape they match.
     next_cluster = n_clusters
@@ -277,7 +284,7 @@ def resolve_alphabet(
             cluster_of[so.key] = next_cluster
             character_of[next_cluster] = None
             confidence_of[next_cluster] = 0.0
-            row = glyph_distance_vector(so.raster, so.rel_height, so.rel_base)
+            row = glyph_distance_vector(so.raster, so.rel_height, so.rel_base, bank)
             ranked_of[next_cluster] = tuple(
                 (c, qs(d)) for c, d in sorted(row.items(), key=lambda kv: (kv[1], kv[0]))[:6]
             )

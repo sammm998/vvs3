@@ -57,12 +57,79 @@ class Reason(str, Enum):
     NO_DESIGNATION = "NO_DESIGNATION"
     OPEN_ENDED_RUN = "OPEN_ENDED_RUN"
     ANNOTATION_EXCLUDED = "ANNOTATION_EXCLUDED"
+    NO_PIPE_EVIDENCE = "NO_PIPE_EVIDENCE"
+    LEADER_ENDS_NOWHERE = "LEADER_ENDS_NOWHERE"
+    TEXT_NOT_CODE_LIKE = "TEXT_NOT_CODE_LIKE"
+    SCALE_CONFLICT = "SCALE_CONFLICT"
+    RECONCILIATION_FAILED = "RECONCILIATION_FAILED"
 
 
 class ScaleState(str, Enum):
+    """Outcome of scale inference.
+
+    ``SCALE_CONFIRMED`` means two or more independent hypotheses agreed.
+    ``RESOLVED`` means exactly one hypothesis was available and nothing
+    contradicted it - usable, but not corroborated.  ``SCALE_CONFLICT`` means
+    hypotheses disagreed beyond tolerance and the engine refuses to choose.
+    """
+
+    SCALE_CONFIRMED = "SCALE_CONFIRMED"
     RESOLVED = "RESOLVED"
+    SCALE_CONFLICT = "SCALE_CONFLICT"
     SCALE_UNKNOWN = "SCALE_UNKNOWN"
     SCALE_AMBIGUOUS = "SCALE_AMBIGUOUS"
+
+
+class AnalysisStatus(str, Enum):
+    """Whether the run may be presented as a quantity take-off at all.
+
+    ``INVALID`` is not a soft warning: it means an internal invariant broke
+    (a metre counted twice, a run in two pipes) and no number in the report may
+    be relied on.  ``INCOMPLETE`` means the invariants hold but something the
+    drawing did not supply - most often the scale - stops the quantities from
+    being measurable.
+    """
+
+    VALID = "VALID"
+    INCOMPLETE = "INCOMPLETE"
+    INVALID = "INVALID"
+
+
+class DrawingRole(str, Enum):
+    """What a piece of geometry *is* on the sheet.
+
+    Assigned to every vector object before any text is consulted, so pipe
+    geometry is found by looking at the drawing rather than by looking at what
+    is left over once the labels have been taken away.
+    """
+
+    TEXT = "TEXT"
+    PIPE = "PIPE"
+    WALL = "WALL"
+    SYMBOL = "SYMBOL"
+    LEADER = "LEADER"
+    DIMENSION = "DIMENSION"
+    REFERENCE_LINE = "REFERENCE_LINE"
+    HATCH = "HATCH"
+    TITLE_BLOCK = "TITLE_BLOCK"
+    LEGEND = "LEGEND"
+    GRID = "GRID"
+    ELEVATION = "ELEVATION"
+    EQUIPMENT = "EQUIPMENT"
+    UNKNOWN = "UNKNOWN"
+
+
+class DesignationTier(str, Enum):
+    """How far a piece of text got towards being a pipe designation.
+
+    Text is never a designation because of the way it is spelled.  It is a
+    designation when there is evidence tying it to a pipe that was detected
+    independently of it, and the tier records exactly how far that evidence got.
+    """
+
+    TEXT_ONLY = "TEXT_ONLY"
+    DESIGNATION_CANDIDATE = "DESIGNATION_CANDIDATE"
+    CONFIRMED_DESIGNATION = "CONFIRMED_DESIGNATION"
 
 
 class TextRole(str, Enum):

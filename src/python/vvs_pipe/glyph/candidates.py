@@ -84,6 +84,7 @@ class SegmentationConfig:
     line_local_floor_ratio: float = 0.55    # of cap, floor for the local height scale
     stack_gap_ratio: float = 0.55           # of cap, rejoining : ; i j
     stack_overlap_ratio: float = 0.45       # of the narrower part's width
+    stack_align_ratio: float = 0.25         # of cap, when a part has no width
     min_cap_height_pt: float = 1.2
     max_cap_height_pt: float = 60.0
     solid_dot_cap_ratio: float = 0.25
@@ -203,7 +204,17 @@ def _merge_stacked_parts(
                 continue
             overlap = min(bi.x1, bj.x1) - max(bi.x0, bj.x0)
             narrower = min(bi.width, bj.width)
-            if narrower <= 0 or overlap / narrower < cfg.stack_overlap_ratio:
+            if narrower > cfg.min_fragment_extent_pt:
+                if overlap / narrower < cfg.stack_overlap_ratio:
+                    continue
+            elif abs(bi.center[0] - bj.center[0]) > cfg.stack_align_ratio * cap:
+                # A part with no width at all cannot be tested by overlap
+                # ratio - the ratio is undefined and the old guard silently
+                # rejected every one of them.  A colon set as two perfectly
+                # vertical hairlines is exactly that shape, and dropping it
+                # turns "1:50" into "1..50" and loses the drawing's scale.
+                # Alignment of the two centres is the same judgement, and it
+                # stays meaningful when a box has zero width.
                 continue
             if max(bi.y1, bj.y1) - min(bi.y0, bj.y0) > cap * 1.25:
                 continue

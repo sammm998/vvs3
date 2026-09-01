@@ -15,6 +15,10 @@ Design decisions that matter for correctness of the whole engine:
   nothing is discarded on a guess.
 * **Curves are flattened deterministically** with a fixed chord tolerance, so
   the IR contains polylines only and every later stage is exact.
+* **Embedded font programs are carried out with the geometry.**  A CAD sheet
+  letters itself in its own typeface and then outlines it, so the drawing's own
+  font is the best possible prototype for recognising those outlines - see
+  :mod:`vvs_pipe.glyph.prototypes`.
 * **Object ids are content addresses.**  They are derived from geometry and
   paint attributes, never from the order in which the content stream happened
   to emit them, so a permuted extraction produces identical ids.
@@ -395,6 +399,24 @@ def extract_document(
                 )
             )
 
+        embedded_fonts: list[tuple[str, bytes]] = []
+        seen_fonts: set[str] = set()
+        for pno in page_indices:
+            for info in doc[pno].get_fonts(full=True):
+                xref = info[0]
+                try:
+                    name, ext, _subtype, buf = doc.extract_font(xref)
+                except Exception:  # pragma: no cover - defensive
+                    continue
+                if not buf or ext not in ("ttf", "otf", "cff", "pfa", "pfb"):
+                    continue
+                key = hashlib.sha256(buf).hexdigest()
+                if key in seen_fonts:
+                    continue
+                seen_fonts.add(key)
+                embedded_fonts.append((str(name), bytes(buf)))
+        embedded_fonts.sort(key=lambda kv: (kv[0], hashlib.sha256(kv[1]).hexdigest()))
+
         return VectorDocument(
             source_name=pdf_path.name,
             sha256=sha256_of(pdf_path),
@@ -403,6 +425,7 @@ def extract_document(
             text_spans=span_out,
             excluded_annotation_objects=dropped_objects,
             excluded_annotation_spans=dropped_spans,
+            embedded_fonts=tuple(embedded_fonts),
         )
     finally:
         doc.close()

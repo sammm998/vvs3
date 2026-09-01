@@ -161,7 +161,21 @@ def _run_from_chain(chain: Sequence[GraphEdge], nodes, page: int) -> PipeRun:
     if width is None:
         reasons.append(Reason.INSUFFICIENT_GEOMETRY)
         state = IdentityState.INSUFFICIENT
-    rid = entity_id("run", (page, tuple((round(x, 4), round(y, 4)) for x, y in centerline)))
+    # Identity must not lose information.  A double-line pipe drawn inside an
+    # insulation jacket produces two pairings that share a midline and differ
+    # only in separation; addressing a run by its centerline alone collapses
+    # those two into one id, and the same id then appears in two physical pipes.
+    # The width and the style are part of what the run *is*, so they are part of
+    # its address.
+    rid = entity_id(
+        "run",
+        (
+            page,
+            tuple((round(x, 4), round(y, 4)) for x, y in centerline),
+            style,
+            -1.0 if width is None else ql(width),
+        ),
+    )
     return PipeRun(
         pipe_run_id=rid,
         page=page,

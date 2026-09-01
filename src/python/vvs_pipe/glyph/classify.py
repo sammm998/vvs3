@@ -30,7 +30,7 @@ from .features import (
     jaccard_distance,
     rasterise_polylines,
 )
-from .prototypes import REL_METRICS, prototype_bank
+from .prototypes import REL_METRICS, Prototype, prototype_bank
 
 Pt = tuple[float, float]
 
@@ -76,15 +76,20 @@ def glyph_distance_vector(
     raster: GlyphRaster,
     rel_h: float,
     rel_base: float,
+    bank: Sequence[Prototype] | None = None,
 ) -> dict[str, float]:
     """Weighted distance from one glyph to every character in the bank.
 
     Exposed separately from :func:`classify_glyph` because the alphabet
     resolver in :mod:`vvs_pipe.glyph.alphabet` aggregates these vectors over
     shape clusters before deciding anything.
+
+    ``bank`` defaults to the base-14 prototypes; the pipeline passes a bank
+    that also holds the drawing's own embedded fonts, and the best match over
+    the whole bank wins.
     """
     out: dict[str, float] = {}
-    for proto in prototype_bank():
+    for proto in bank if bank is not None else prototype_bank():
         ch = proto.character
         nom_h, nom_base = REL_METRICS.get(ch, (1.0, 0.0))
         d = (
@@ -113,6 +118,7 @@ def classify_glyph(
     baseline_y: float,
     bbox: tuple[float, float, float, float],
     prior: Mapping[str, float] | None = None,
+    bank: Sequence[Prototype] | None = None,
 ) -> ClassificationResult:
     x0, y0, x1, y1 = bbox
     raster = rasterise_polylines(polylines, filled=filled)
@@ -121,7 +127,7 @@ def classify_glyph(
     rel_base = (baseline_y - y1) / cap  # glyph bottom above the line baseline
 
     scores: dict[str, float] = {}
-    for ch, d in glyph_distance_vector(raster, rel_h, rel_base).items():
+    for ch, d in glyph_distance_vector(raster, rel_h, rel_base, bank).items():
         s = math.exp(-d)
         if prior:
             s *= math.exp(prior.get(ch, 0.0))

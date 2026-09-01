@@ -1,18 +1,21 @@
-"""Drawing scale detection.
+"""Drawing scale inference.
 
-Two independent sources, cross-checked against each other:
+Estimates come from :mod:`vvs_pipe.measurement.hypotheses`, which offers each
+independent source the drawing might supply: the ratio note read exactly, the
+ratio note recovered through the glyph classifier's own alternatives, dimension
+annotations, and a scale bar.  This module does the deciding.
 
-* **ratio note** - any ``1:N`` found in the sheet's text.  N is not looked up
-  anywhere; the note gives metres per point directly, because a PDF point is a
-  fixed physical length on the paper.
-* **scale bar** - a row of congruent adjacent cells with numeric labels at its
-  ends.  The bar gives *units* per point; the unit is only accepted as metres
-  when a unit token sits next to the bar, or when the ratio note independently
-  agrees.
+Four outcomes, and the distinctions between them matter:
 
-If the two disagree beyond tolerance the result is SCALE_AMBIGUOUS and no
-quantity is presented as verified.  If neither is available the result is
-SCALE_UNKNOWN - never a default.
+* **SCALE_CONFIRMED** - two or more *different kinds* of source agree.
+* **RESOLVED** - one kind of source, uncontradicted.  Usable, uncorroborated.
+* **SCALE_CONFLICT** - sources disagree beyond tolerance.  No number is
+  produced: the engine has two honest readings and no basis for preferring
+  one, and quietly taking the heavier is how a detectable problem becomes a
+  wrong answer.
+* **SCALE_UNKNOWN** - the drawing said nothing this engine can hear.
+
+Never a default, in any of the four.
 """
 
 from __future__ import annotations
@@ -22,13 +25,22 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from ..canonical import canonical_sort, qs
-from ..designations.discovery import parse_ratio
 from ..geometry.primitives import BBox
-from ..model import Provenance, ScaleResult, TextItem, VectorObject
+from ..model import GlyphCandidate, Provenance, ScaleResult, TextItem, VectorObject
 from ..states import Reason, ScaleState
+from .hypotheses import (
+    POINT_IN_METRES as _POINT_IN_METRES,
+    ScaleHypothesis,
+    dimension_hypotheses,
+    ratio_note_hypotheses,
+    tolerant_ratio_hypotheses,
+)
 
-POINT_IN_METRES = 25.4 / 72.0 / 1000.0
+POINT_IN_METRES = _POINT_IN_METRES
 CROSS_CHECK_TOLERANCE = 0.05
+# A rival cluster carrying at least this share of the winner's weight is a real
+# disagreement, not noise, and the engine refuses to choose between them.
+CONFLICT_WEIGHT_FRACTION = 0.5
 BAR_MIN_CELLS = 3
 BAR_CELL_TOLERANCE_PT = 0.75
 METRE_TOKENS = frozenset({"M", "m"})
@@ -81,92 +93,151 @@ def _find_scale_bars(objects: Sequence[VectorObject]) -> list[ScaleBar]:
     return canonical_sort(bars, key=lambda b: b.bbox.key())
 
 
+def infer_scale(
+    text_items: Sequence[TextItem],
+    objects: Sequence[VectorObject],
+    page_box: BBox,
+    glyphs: Sequence[GlyphCandidate] = (),
+    cap_height: float = 7.0,
+) -> ScaleResult:
+    """Weigh every independent estimate of the drawing's scale against the rest.
+
+    A single source is usable but uncorroborated, so it resolves rather than
+    confirms.  Two or more sources agreeing to within tolerance is the strongest
+    outcome available and is what SCALE_CONFIRMED means.  Sources that disagree
+    beyond tolerance produce SCALE_CONFLICT and *no* number: the engine has two
+    honest readings of the drawing and no basis for preferring one, and picking
+    the heavier would be exactly the kind of quiet tie-break that turns a
+    detectable problem into a wrong answer.
+    """
+    glyph_map = {g.glyph_id: g for g in glyphs}
+    hypotheses: list[ScaleHypothesis] = []
+    hypotheses += ratio_note_hypotheses(text_items)
+    hypotheses += tolerant_ratio_hypotheses(text_items, glyph_map)
+    hypotheses += dimension_hypotheses(text_items, objects, cap_height)
+    for bar in _find_scale_bars(objects):
+        h = _scale_bar_hypothesis(bar, text_items)
+        if h is not None:
+            hypotheses.append(h)
+
+    hypotheses = canonical_sort(
+        hypotheses, key=lambda h: (h.source, qs(h.metres_per_point), h.note)
+    )
+    sources = tuple(
+        (f"{h.source}[{i}]", qs(h.metres_per_point / POINT_IN_METRES))
+        for i, h in enumerate(hypotheses)
+    )
+    notes = tuple(f"{h.source}: {h.note}" for h in hypotheses)
+    provenance = Provenance(
+        stage="scale",
+        rule="independent hypotheses, clustered and cross-checked",
+        notes=notes,
+    )
+
+    if not hypotheses:
+        return ScaleResult(
+            state=ScaleState.SCALE_UNKNOWN,
+            metres_per_point=None,
+            ratio_denominator=None,
+            sources=(),
+            reasons=(Reason.SCALE_UNKNOWN,),
+            provenance=provenance,
+        )
+
+    clusters = _cluster(hypotheses)
+    best = max(clusters, key=lambda c: (qs(sum(h.weight for h in c)), -qs(c[0].metres_per_point)))
+    rivals = [
+        c
+        for c in clusters
+        if c is not best
+        and sum(h.weight for h in c) >= CONFLICT_WEIGHT_FRACTION * sum(h.weight for h in best)
+    ]
+    if rivals:
+        return ScaleResult(
+            state=ScaleState.SCALE_CONFLICT,
+            metres_per_point=None,
+            ratio_denominator=None,
+            sources=sources,
+            reasons=(Reason.SCALE_CONFLICT,),
+            provenance=provenance,
+        )
+
+    # Weighted mean inside the winning cluster: the members already agree to
+    # within tolerance, so this refines the estimate rather than choosing.
+    total = sum(h.weight for h in best)
+    mpp = sum(h.metres_per_point * h.weight for h in best) / total
+    denominators = sorted({h.ratio_denominator for h in best if h.ratio_denominator})
+    distinct_sources = {h.source for h in best}
+    confirmed = len(distinct_sources) >= 2
+    return ScaleResult(
+        state=ScaleState.SCALE_CONFIRMED if confirmed else ScaleState.RESOLVED,
+        metres_per_point=mpp,
+        ratio_denominator=denominators[0] if len(denominators) == 1 else None,
+        sources=sources + (("agreeingSources", float(len(distinct_sources))),),
+        reasons=(),
+        provenance=provenance,
+    )
+
+
+def _cluster(hypotheses: Sequence[ScaleHypothesis]) -> list[list[ScaleHypothesis]]:
+    """Group estimates that agree to within tolerance.
+
+    Agreement is relative, not absolute, because the same relative error means
+    the same thing at 1:50 and at 1:500.
+    """
+    clusters: list[list[ScaleHypothesis]] = []
+    for h in hypotheses:
+        for c in clusters:
+            reference = sum(x.metres_per_point * x.weight for x in c) / sum(x.weight for x in c)
+            if abs(h.metres_per_point - reference) <= CROSS_CHECK_TOLERANCE * reference:
+                c.append(h)
+                break
+        else:
+            clusters.append([h])
+    return clusters
+
+
+def _scale_bar_hypothesis(
+    bar: ScaleBar, text_items: Sequence[TextItem]
+) -> ScaleHypothesis | None:
+    probe = bar.bbox.expanded(max(12.0, bar.bbox.height * 3.0))
+    numbers: list[float] = []
+    has_metre_token = False
+    for t in text_items:
+        if not probe.intersects(t.bbox):
+            continue
+        token = t.text.strip()
+        if token in METRE_TOKENS:
+            has_metre_token = True
+        elif token.replace(".", "", 1).isdigit():
+            numbers.append(float(token))
+    if len(numbers) < 2 or bar.length_pt <= 0:
+        return None
+    span = max(numbers) - min(numbers)
+    if span <= 0:
+        return None
+    return ScaleHypothesis(
+        source="scaleBar",
+        metres_per_point=span / bar.length_pt,
+        # Without a unit token beside it the bar's numbers could be metres or
+        # millimetres; it is still offered, but it cannot carry the decision on
+        # its own and its weight says so.
+        weight=0.7 if has_metre_token else 0.25,
+        ratio_denominator=None,
+        evidence=(("cells", float(bar.cells)), ("lengthPt", qs(bar.length_pt)), ("span", qs(span))),
+        note=f"bar of {bar.cells} cells spanning {qs(span)} units",
+    )
+
+
 def detect_scale(
     text_items: Sequence[TextItem],
     objects: Sequence[VectorObject],
     page_box: BBox,
 ) -> ScaleResult:
-    sources: list[tuple[str, float]] = []
-    reasons: list[Reason] = []
-    notes: list[str] = []
+    """Infer the scale from text and geometry alone.
 
-    ratio_mpp: float | None = None
-    ratio_den: float | None = None
-    for t in canonical_sort(list(text_items), key=lambda t: t.canonical_key()):
-        den = parse_ratio(t.text)
-        if den is not None:
-            ratio_den = den
-            ratio_mpp = POINT_IN_METRES * den
-            sources.append(("ratioNote", qs(den)))
-            notes.append(f"ratioNote={t.text!r}")
-            break
-
-    bar_upp: float | None = None
-    bars = _find_scale_bars(objects)
-    for bar in bars:
-        probe = bar.bbox.expanded(max(12.0, bar.bbox.height * 3.0))
-        numbers: list[float] = []
-        has_metre_token = False
-        for t in text_items:
-            if not probe.intersects(t.bbox):
-                continue
-            token = t.text.strip()
-            if token in METRE_TOKENS:
-                has_metre_token = True
-            elif token.replace(".", "", 1).isdigit():
-                numbers.append(float(token))
-        if len(numbers) >= 2 and bar.length_pt > 0:
-            span = max(numbers) - min(numbers)
-            if span > 0:
-                bar_upp = span / bar.length_pt
-                sources.append(("scaleBarUnitsPerPoint", qs(bar_upp)))
-                notes.append(
-                    f"scaleBar cells={bar.cells} lengthPt={qs(bar.length_pt)} "
-                    f"span={qs(span)} metreToken={has_metre_token}"
-                )
-                if not has_metre_token:
-                    notes.append("scaleBarUnitAssumedFromRatioAgreement")
-                break
-
-    provenance = Provenance(
-        stage="scale",
-        rule="ratio note and scale bar, cross-checked",
-        notes=tuple(notes),
-    )
-
-    if ratio_mpp is not None and bar_upp is not None:
-        rel = abs(bar_upp - ratio_mpp) / max(ratio_mpp, 1e-12)
-        if rel <= CROSS_CHECK_TOLERANCE:
-            return ScaleResult(
-                state=ScaleState.RESOLVED,
-                metres_per_point=ratio_mpp,
-                ratio_denominator=ratio_den,
-                sources=tuple(sources) + (("crossCheckRelativeError", qs(rel)),),
-                reasons=(),
-                provenance=provenance,
-            )
-        return ScaleResult(
-            state=ScaleState.SCALE_AMBIGUOUS,
-            metres_per_point=None,
-            ratio_denominator=ratio_den,
-            sources=tuple(sources) + (("crossCheckRelativeError", qs(rel)),),
-            reasons=(Reason.SCALE_AMBIGUOUS,),
-            provenance=provenance,
-        )
-    if ratio_mpp is not None:
-        return ScaleResult(
-            state=ScaleState.RESOLVED,
-            metres_per_point=ratio_mpp,
-            ratio_denominator=ratio_den,
-            sources=tuple(sources),
-            reasons=(),
-            provenance=provenance,
-        )
-    return ScaleResult(
-        state=ScaleState.SCALE_UNKNOWN,
-        metres_per_point=None,
-        ratio_denominator=None,
-        sources=tuple(sources),
-        reasons=(Reason.SCALE_UNKNOWN,),
-        provenance=provenance,
-    )
+    Kept as the name the rest of the engine and its tests use; the work is
+    :func:`infer_scale`, which also accepts the glyph evidence needed to read a
+    note through the classifier's alternatives.
+    """
+    return infer_scale(text_items, objects, page_box)

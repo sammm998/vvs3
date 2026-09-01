@@ -163,10 +163,66 @@ def build_graph(
         )
 
     nodes = canonical_sort(nodes, key=lambda n: ((qc(n.point[0]), qc(n.point[1])), n.node_id))
+    out_edges = _collapse_coincident_edges(out_edges, page)
     out_edges = canonical_sort(
         out_edges, key=lambda e: (tuple((qc(x), qc(y)) for x, y in e.polyline), e.edge_id)
     )
     return PipeGraph(tuple(nodes), tuple(out_edges), page)
+
+
+# An edge carrying a measured width says more about what was drawn than a dashed
+# chain, which says more than a lone stroke; this is the order in which a
+# coincident group's survivor is chosen.
+_EDGE_STYLE_EVIDENCE = {"double_line": 0, "dashed_line": 1, "single_line": 2}
+
+
+def _collapse_coincident_edges(edges: Sequence[GraphEdge], page: int) -> list[GraphEdge]:
+    """One stretch of drawn centerline is one edge.
+
+    Splitting candidates at tees cuts long candidates into pieces, and two
+    candidates that overlap along part of their length therefore produce pieces
+    with identical geometry.  They are not two pipes lying exactly on top of
+    each other; they are one stretch of drawing found twice, and keeping both
+    measures those metres twice and puts the resulting run into two physical
+    pipes.  Only exact coincidence collapses, so two pipes running close
+    together are untouched, and the survivor is chosen by evidence rather than
+    by which candidate happened to be processed first.
+    """
+    groups: dict[tuple, list[GraphEdge]] = {}
+    for e in edges:
+        fwd = tuple((qc(x), qc(y)) for x, y in e.polyline)
+        rev = tuple(reversed(fwd))
+        groups.setdefault((e.node_a, e.node_b, fwd if fwd <= rev else rev), []).append(e)
+
+    out: list[GraphEdge] = []
+    for key in sorted(groups, key=lambda k: (k[0], k[1], k[2])):
+        members = groups[key]
+        if len(members) == 1:
+            out.append(members[0])
+            continue
+        keeper = canonical_sort(
+            members,
+            key=lambda e: (
+                _EDGE_STYLE_EVIDENCE.get(e.style, len(_EDGE_STYLE_EVIDENCE)),
+                1e9 if e.width_pt is None else qc(e.width_pt),
+                e.candidate_id,
+            ),
+        )[0]
+        # Re-addressed on the geometry the group shares, so the surviving edge's
+        # identity does not depend on which candidate won.
+        out.append(
+            GraphEdge(
+                edge_id=entity_id("ed", (page, key[2], keeper.style)),
+                page=keeper.page,
+                node_a=keeper.node_a,
+                node_b=keeper.node_b,
+                polyline=keeper.polyline,
+                candidate_id=keeper.candidate_id,
+                width_pt=keeper.width_pt,
+                style=keeper.style,
+            )
+        )
+    return out
 
 
 def _heal_corners(polys: list[list[Pt]], cands: Sequence[PipeCandidate], cfg: TopologyConfig) -> None:

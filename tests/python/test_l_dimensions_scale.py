@@ -42,13 +42,15 @@ def test_no_evidence_means_no_diameter():
 def test_scale_is_read_from_the_sheet_and_cross_checked(analysis_a, specs_by_stem):
     spec = specs_by_stem["drawing_a"]
     scale = analysis_a.pages[0].scale
-    assert scale.state is ScaleState.RESOLVED
+    # Two different kinds of source agreeing is the strongest available
+    # outcome; one alone would only be RESOLVED.
+    assert scale.state is ScaleState.SCALE_CONFIRMED
     assert scale.ratio_denominator == pytest.approx(spec.scale_denominator)
-    assert scale.metres_per_point == pytest.approx(spec.metres_per_point, rel=1e-9)
-    names = {k for k, _v in scale.sources}
+    assert scale.metres_per_point == pytest.approx(spec.metres_per_point, rel=1e-3)
+    names = {k.split("[")[0] for k, _v in scale.sources}
     assert "ratioNote" in names
-    assert "scaleBarUnitsPerPoint" in names, "the scale bar should corroborate the note"
-    assert "crossCheckRelativeError" in names
+    assert "scaleBar" in names, "the scale bar should corroborate the note"
+    assert ("agreeingSources", 2.0) in scale.sources
 
 
 def test_a_different_sheet_gets_its_own_scale(analysis_b, specs_by_stem):

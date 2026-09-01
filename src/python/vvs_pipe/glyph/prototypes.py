@@ -1,19 +1,28 @@
 """Reference glyph bank.
 
-Prototypes are rendered at run time from the PDF base-14 fonts that every
-viewer ships, so the bank contains *characters*, not drawing codes.  Nothing
-here knows which designations a drawing might contain; adding a new drawing
-with entirely new codes requires no change.
+Prototypes are rendered at run time from two sources, and the bank contains
+*characters*, not drawing codes.  Nothing here knows which designations a
+drawing might contain; a drawing with entirely new codes needs no change.
 
-Several typefaces are rendered per character and the classifier takes the best
-match, which absorbs the difference between a filled serif outline and a
-single-stroke CAD font.
+* the PDF **base-14** fonts every viewer ships, several typefaces per
+  character, which absorbs the difference between a filled serif outline and a
+  single-stroke CAD font;
+* the **drawing's own embedded fonts**.  A CAD sheet letters itself in a
+  technical face - the reference sheet uses ISOCPEUR - and then exports that
+  lettering as outlines.  Matching those outlines against Helvetica is what
+  produced the systematic A->4, R->9, E->Z confusions; matching them against
+  the sheet's own font is matching like with like.  The font is read out of the
+  file being analysed, so this stays entirely open-world.
+
+Embedded fonts are usually *subsets* holding only the characters the file's
+real text layer used, so the base-14 bank still covers everything else.
 """
 
 from __future__ import annotations
 
 import functools
 from dataclasses import dataclass
+from typing import Sequence
 
 import numpy as np
 
@@ -48,6 +57,7 @@ class Prototype:
     character: str
     font: str
     raster: GlyphRaster
+    source: str = "base14"
 
     @property
     def holes(self) -> int:
@@ -60,6 +70,63 @@ class Prototype:
     @property
     def junctions(self) -> int:
         return self.raster.junctions
+
+
+def _mask_of(page, px: int) -> np.ndarray | None:
+    import fitz
+
+    pm = page.get_pixmap(colorspace=fitz.csGRAY, alpha=False)
+    arr = np.frombuffer(pm.samples, dtype=np.uint8).reshape(pm.height, pm.width)
+    mask = (arr < 128).astype(np.uint8)
+    return mask if mask.any() else None
+
+
+def _render_embedded(ch: str, buffer: bytes, px: int = 160) -> np.ndarray | None:
+    import fitz
+
+    try:
+        font = fitz.Font(fontbuffer=buffer)
+    except Exception:  # pragma: no cover - unusable font program
+        return None
+    if not font.has_glyph(ord(ch)):
+        return None
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=px, height=px)
+        writer = fitz.TextWriter(page.rect)
+        writer.append(fitz.Point(px * 0.12, px * 0.78), ch, font=font, fontsize=px * 0.62)
+        writer.write_text(page)
+        return _mask_of(page, px)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    finally:
+        doc.close()
+
+
+def embedded_prototypes(
+    fonts: Sequence[tuple[str, bytes]], px: int = 160
+) -> tuple[Prototype, ...]:
+    """Render the alphabet from the fonts embedded in the drawing itself."""
+    out: list[Prototype] = []
+    for name, buffer in fonts:
+        for ch in ALPHABET:
+            mask = _render_embedded(ch, buffer, px)
+            if mask is None:
+                continue
+            out.append(
+                Prototype(
+                    character=ch,
+                    font=f"embedded:{name}",
+                    raster=rasterise_mask(mask),
+                    source="embedded",
+                )
+            )
+    return tuple(out)
+
+
+def combined_bank(embedded: Sequence[Prototype] = ()) -> tuple[Prototype, ...]:
+    """The base-14 bank plus whatever the drawing brought with it."""
+    return tuple(embedded) + prototype_bank()
 
 
 def _render_char(ch: str, font: str, px: int = 160) -> np.ndarray | None:
