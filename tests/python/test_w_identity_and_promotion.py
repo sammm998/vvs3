@@ -382,13 +382,27 @@ def test_lettering_identified_by_grouping_is_labelled_text():
     assert result.by_object["p1"] is not DrawingRole.TEXT
 
 
-def test_a_line_spanning_the_drawing_is_a_grid_line():
+def test_a_family_of_lines_spanning_the_drawing_is_a_grid():
     objects = [
-        _object(((0.0, 0.0), (400.0, 0.0)), "grid"),
+        _object(((0.0, 0.0), (400.0, 0.0)), "grid1"),
+        _object(((0.0, 100.0), (400.0, 100.0)), "grid2"),
+        _object(((0.0, 200.0), (400.0, 200.0)), "grid3"),
         _object(((10.0, 5.0), (30.0, 5.0)), "short"),
     ]
     result = classify_roles(objects, BBox(0.0, 0.0, 400.0, 400.0), cap_height=7.0)
-    assert result.by_object["grid"] is DrawingRole.GRID
+    assert all(result.by_object[f"grid{i}"] is DrawingRole.GRID for i in (1, 2, 3))
+    assert result.by_object["short"] is not DrawingRole.GRID
+
+
+def test_one_long_stroke_alone_is_not_a_grid_line():
+    """A schematic's longest pipe spans the sheet too; calling it a grid line
+    would delete it from the take-off."""
+    objects = [
+        _object(((0.0, 0.0), (400.0, 0.0)), "long"),
+        _object(((10.0, 5.0), (30.0, 5.0)), "short"),
+    ]
+    result = classify_roles(objects, BBox(0.0, 0.0, 400.0, 400.0), cap_height=7.0)
+    assert result.by_object["long"] is not DrawingRole.GRID
 
 
 def test_no_rule_reads_a_layer_name():

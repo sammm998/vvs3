@@ -44,6 +44,7 @@ from .model import (
     VerticalSegment,
 )
 from .pdf_forensics import ForensicReport, forensic_report
+from .roles import classify_roles, non_pipe_objects, role_coverage
 from .pipes import dedupe_candidates, detect_pipes, reconstruct_dashes, single_line_candidates
 from .states import AnalysisStatus, DesignationTier, IdentityState, Reason, ScaleState
 from .text_reconstruction import reconstruct_text
@@ -319,11 +320,21 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
     panels = detect_panels(objects, text.items, box, page)
     panel_boxes = [p.bbox for p in panels]
 
+    # What each piece of geometry *is*, decided from the drawing's own grouping
+    # and the shape of what each group contains - never from a layer's name.
+    # Only confident, unambiguous verdicts remove anything: building fabric on
+    # this sheet is long strokes that never join end to end, the opposite of a
+    # pipe network, and that alone is enough to keep a wall cavity out of the
+    # take-off.  A weak verdict leaves the geometry in play, because a pipe
+    # wrongly dropped is invisible while a wall wrongly kept is arguable.
+    roles = classify_roles(objects, box, cap, text.consumed_object_ids)
+    not_pipework = non_pipe_objects(roles)
+
     detection = detect_pipes(
         objects,
         box,
         page,
-        text.consumed_object_ids,
+        text.consumed_object_ids | not_pipework,
         panel_boxes,
         cap,
         dash_chains=dash_chains,
@@ -450,6 +461,9 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
         "artworkObjectsExcluded": len(artwork_ids),
         "dashReconstruction": dash_diagnostics,
         "designationTiers": tier_counts(designations),
+        "drawingRoles": roles.to_canonical()["counts"],
+        "roleCoverage": role_coverage(roles),
+        "excludedAsNotPipework": len(not_pipework),
         "duplicateCandidatesMerged": duplicate_candidates,
         "concentricCandidatesMerged": concentric_candidates,
     }

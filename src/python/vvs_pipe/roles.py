@@ -42,6 +42,7 @@ from .states import DrawingRole
 TEXT_MAX_EXTENT_CAPS = 1.6        # a character is about one cap height across
 SYMBOL_MAX_EXTENT_CAPS = 6.0      # riser circles, valve marks
 GRID_MIN_SPAN_RATIO = 0.55        # of the drawn extent, for a building grid line
+GRID_MIN_FAMILY = 3               # a grid is a set of lines, never a single one
 LONG_STROKE_CAPS = 6.0            # "long" for the purpose of network statistics
 HATCH_MIN_MEMBERS = 12            # a hatch is many parallel strokes, not three
 HATCH_ANGLE_TOLERANCE_RAD = math.radians(4.0)
@@ -51,6 +52,12 @@ PANEL_MAX_AREA_RATIO = 0.35
 PANEL_DENSITY_MULTIPLE = 3.0      # of the sheet's mean object density
 DOMINANT_FRACTION = 0.70          # "most of this layer does X"
 NETWORK_JOIN_CAPS = 0.25          # endpoint join tolerance, in cap heights
+# A layer is evidence because it *divides* the drawing by purpose.  A layer
+# holding almost everything divides nothing, so its signature describes the
+# sheet rather than its members and must not speak for any of them.  A drawing
+# exported without layer information lands here as one undifferentiated group,
+# and every object in it falls back to its own geometry.
+MAX_LAYER_SHARE_TO_SPEAK = 0.60
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +262,7 @@ def _layer_signatures(
     for o in objects:
         by_layer.setdefault(o.layer or "", []).append(o)
 
+    total = len(objects)
     out: list[LayerSignature] = []
     for layer in sorted(by_layer):
         members = canonical_sort(by_layer[layer], key=lambda x: x.canonical_key())
@@ -281,7 +289,9 @@ def _layer_signatures(
         span = BBox.union_all([m.bbox for m in members])
         span_ratio = max(span.width, span.height) / drawn_span
 
+        share = n / total
         role, conf, ev = _layer_role(
+            share=share,
             objects=n,
             closed_fraction=closed_fraction,
             filled_fraction=filled_fraction,
@@ -315,6 +325,7 @@ def _layer_signatures(
 
 def _layer_role(
     *,
+    share: float,
     objects: int,
     closed_fraction: float,
     filled_fraction: float,
@@ -335,6 +346,7 @@ def _layer_role(
     """
     ev: list[tuple[str, float]] = [
         ("objects", float(objects)),
+        ("shareOfDrawing", qs(share)),
         ("closedFraction", qs(closed_fraction)),
         ("medianExtentCaps", qs(median_extent_caps)),
         ("longFraction", qs(long_fraction)),
@@ -342,6 +354,9 @@ def _layer_role(
         ("spanRatio", qs(span_ratio)),
         ("textFraction", qs(text_fraction)),
     ]
+    if share > MAX_LAYER_SHARE_TO_SPEAK:
+        return DrawingRole.UNKNOWN, 0.0, ev
+
     scores: dict[DrawingRole, float] = {}
 
     # Lettering: many small objects, hardly any of them long or closed, and the
@@ -483,13 +498,15 @@ def _merge_overlapping(boxes: Sequence[BBox]) -> list[BBox]:
 
 
 def _grid_lines(objects: Sequence[VectorObject], drawn_span: float) -> frozenset[str]:
-    """Straight strokes spanning most of the drawing along one axis.
+    """Families of long axis-aligned strokes running across the whole drawing.
 
-    A building grid line runs the width or height of the plan; nothing else
-    does, so span plus axis-alignment identifies it without reference to the
-    bubbles at its ends.
+    Span and alignment alone are not enough: on a schematic, a single long
+    straight pipe spans most of the sheet too, and treating it as a grid line
+    deletes it from the take-off.  A building grid is never one line - it is a
+    set of them, in a shared direction - so a family is required, and a lone
+    long stroke is left to be judged on other evidence.
     """
-    out: set[str] = set()
+    by_axis: dict[str, list[str]] = {"x": [], "y": []}
     for o in objects:
         if o.closed or len(o.points) != 2:
             continue
@@ -498,8 +515,15 @@ def _grid_lines(objects: Sequence[VectorObject], drawn_span: float) -> frozenset
         span = max(dx, dy)
         if span < GRID_MIN_SPAN_RATIO * drawn_span:
             continue
-        if min(dx, dy) <= 0.02 * span:  # axis-aligned to within 1 degree
-            out.add(o.object_id)
+        if min(dx, dy) > 0.02 * span:  # axis-aligned to within about a degree
+            continue
+        by_axis["x" if dx >= dy else "y"].append(o.object_id)
+
+    out: set[str] = set()
+    for axis in sorted(by_axis):
+        members = by_axis[axis]
+        if len(members) >= GRID_MIN_FAMILY:
+            out |= set(members)
     return frozenset(out)
 
 
@@ -539,6 +563,47 @@ def _hatch_groups(objects: Sequence[VectorObject], cap: float) -> frozenset[str]
         variation = math.sqrt(sum((g - mean) ** 2 for g in gaps) / len(gaps)) / mean
         if variation <= HATCH_SPACING_VARIATION:
             out |= {oid for _off, oid in offsets}
+    return frozenset(out)
+
+
+# Roles that are definitely not pipework.  TEXT is deliberately absent: the
+# layer-level TEXT verdict is unreliable on a sheet where labels and pipework
+# share a layer, and lettering is already removed per object by the text stages.
+# SYMBOL is absent because detection has its own, better-targeted rule for it,
+# and UNKNOWN is absent because not knowing is not a reason to delete geometry.
+NOT_PIPEWORK = frozenset(
+    {
+        DrawingRole.WALL,
+        DrawingRole.GRID,
+        DrawingRole.HATCH,
+        DrawingRole.REFERENCE_LINE,
+        DrawingRole.TITLE_BLOCK,
+        DrawingRole.LEGEND,
+    }
+)
+
+# A verdict inherited from a layer removes geometry only when the layer's
+# signature was unambiguous.  A weak verdict leaves the object in play: a pipe
+# wrongly dropped is invisible in the output, while a wall wrongly kept is
+# visible as unnamed geometry and can be argued with.
+MIN_LAYER_CONFIDENCE_TO_EXCLUDE = 0.75
+
+
+def non_pipe_objects(classification: RoleClassification) -> frozenset[str]:
+    """Objects this stage is confident are not pipework.
+
+    Used to keep building fabric out of pipe detection.  On a real sheet the
+    architectural wall layer is drawn as long strokes that never join end to
+    end, which is the opposite of a pipe network and is why the distinction
+    survives without reading a single layer name.
+    """
+    out: set[str] = set()
+    for a in classification.assignments:
+        if a.role not in NOT_PIPEWORK:
+            continue
+        if a.source == "layer" and a.confidence < MIN_LAYER_CONFIDENCE_TO_EXCLUDE:
+            continue
+        out.add(a.object_id)
     return frozenset(out)
 
 
