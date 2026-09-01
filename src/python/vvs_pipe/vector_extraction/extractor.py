@@ -282,7 +282,11 @@ def extract_document(
                         clip_box = None
 
                 for kind, pts, closed in _subpaths_from_items(dr.get("items", ()), cfg):
-                    closed = closed or close_path
+                    # A subpath whose last point coincides with its first is a
+                    # closed contour whatever the content stream's closePath
+                    # flag says - CAD exporters commonly emit the repeated
+                    # point instead of the operator.
+                    closed = closed or close_path or (len(pts) > 2 and pts[0] == pts[-1])
                     if closed and len(pts) > 2 and pts[0] != pts[-1]:
                         pts = pts + [pts[0]]
                     box = BBox.from_points(pts)

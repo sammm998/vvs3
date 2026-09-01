@@ -58,16 +58,18 @@ class DesignationDiscovery:
     designations: tuple[Designation, ...]
     scale_notes: tuple[tuple[str, float], ...]
     elevation_notes: tuple[tuple[str, float, BBox], ...]
+    leaders: tuple[tuple[str, Segment], ...]
+    leader_object_ids: frozenset[str]
 
 
-def _leader_candidates(objects: Sequence[VectorObject], cap: float) -> list[Segment]:
-    out: list[Segment] = []
+def _leader_candidates(objects: Sequence[VectorObject], cap: float) -> list[tuple[str, Segment]]:
+    out: list[tuple[str, Segment]] = []
     for o in objects:
         if not o.is_stroked or len(o.points) != 2:
             continue
         seg = Segment(o.points[0], o.points[1])
         if seg.length >= LEADER_MIN_LENGTH_RATIO * cap:
-            out.append(seg)
+            out.append((o.object_id, seg))
     return out
 
 
@@ -128,15 +130,22 @@ def discover_designations(
     panels: Sequence[Panel],
     page_box: BBox,
     page: int,
+    exclude_object_ids: frozenset[str] = frozenset(),
 ) -> DesignationDiscovery:
     items = canonical_sort(list(text_items), key=lambda t: t.canonical_key())
     caps = sorted(max(t.height, 1e-3) for t in items) or [7.0]
     median_cap = caps[len(caps) // 2]
 
-    leaders = _leader_candidates(objects, median_cap)
+    leaders = [
+        (oid, seg)
+        for oid, seg in _leader_candidates(objects, median_cap)
+        if oid not in exclude_object_ids
+    ]
     leader_index: SpatialIndex[int] = SpatialIndex.for_items(
-        [(s.bbox, i) for i, s in enumerate(leaders)]
+        [(s.bbox, i) for i, (_oid, s) in enumerate(leaders)]
     )
+    attached_leaders: set[str] = set()
+    attached_pairs: list[tuple[str, Segment]] = []
     geom_index: SpatialIndex[int] = SpatialIndex.for_items(
         [(o.bbox, i) for i, o in enumerate(objects) if o.is_stroked]
     )
@@ -178,17 +187,21 @@ def discover_designations(
         if elevation is not None:
             elevation_notes.append((t.text, elevation, t.bbox))
 
+        # A leader points at something *readable*.  An unresolved mark is not
+        # a label, so geometry touching it is not a leader - without this a
+        # pipe ending at a riser symbol would be re-read as an annotation.
         probe = t.bbox.expanded(LEADER_ATTACH_RATIO * cap)
+        readable = t.state is not IdentityState.UNRESOLVED and len(t.text.strip()) >= 2
         has_leader = False
         leader_len = 0.0
-        for li in leader_index.query_box(probe):
-            s = leaders[li]
-            for end in (s.a, s.b):
-                if probe.contains_point(end) and not t.bbox.expanded(-0.1).contains_point(
-                    s.b if end is s.a else s.a
-                ):
+        for li in (leader_index.query_box(probe) if readable else ()):
+            oid, s = leaders[li]
+            for end, other in ((s.a, s.b), (s.b, s.a)):
+                if probe.contains_point(end) and not t.bbox.expanded(-0.1).contains_point(other):
                     has_leader = True
                     leader_len = max(leader_len, s.length)
+                    attached_leaders.add(oid)
+                    attached_pairs.append((t.text_id, s))
         near_r = NEAR_GEOMETRY_RATIO * cap
         near_geometry = 0
         for oi in geom_index.query_box(t.bbox.expanded(near_r)):
@@ -267,6 +280,7 @@ def discover_designations(
                 page=page,
                 text=t.text,
                 bbox=t.bbox,
+                rotation=t.rotation,
                 role=role,
                 role_scores=role_scores,
                 is_legend=role is TextRole.LEGEND_ENTRY,
@@ -305,9 +319,9 @@ def discover_designations(
     return DesignationDiscovery(
         designations=tuple(designations),
         scale_notes=tuple(sorted(set(scale_notes))),
-        elevation_notes=tuple(
-            sorted(elevation_notes, key=lambda e: (e[2].key(), e[0]))
-        ),
+        elevation_notes=tuple(sorted(elevation_notes, key=lambda e: (e[2].key(), e[0]))),
+        leaders=tuple(sorted(attached_pairs, key=lambda kv: (kv[1].key(), kv[0]))),
+        leader_object_ids=frozenset(attached_leaders),
     )
 
 

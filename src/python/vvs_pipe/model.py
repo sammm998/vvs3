@@ -345,6 +345,7 @@ class Designation:
     page: int
     text: str
     bbox: BBox
+    rotation: float
     role: TextRole
     role_scores: tuple[tuple[str, float], ...]
     is_legend: bool
@@ -370,6 +371,7 @@ class Designation:
             "page": self.page,
             "designation": self.text,
             "bbox": self.bbox.to_canonical(),
+            "rotation": qs(self.rotation),
             "role": self.role.value,
             "roleScores": [[k, qs(v)] for k, v in self.role_scores],
             "isLegend": self.is_legend,
