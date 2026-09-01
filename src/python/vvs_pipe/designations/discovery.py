@@ -1,0 +1,337 @@
+"""Open-world designation discovery.
+
+There is no list of known codes anywhere in this module.  A text item is
+scored for each role from the *shape of its token structure* and from the
+geometry around it:
+
+* token structure - runs of letters/digits joined by separators, how many runs,
+  whether a run is a plausible nominal size, whether the string is a ratio, an
+  elevation, or plain words;
+* geometry - whether the text sits inside a legend/title panel, whether a
+  leader line starts at it, how much drawing geometry runs nearby, and how many
+  times the same string occurs on the sheet.
+
+A drawing whose codes have never been seen before scores exactly the same way.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from dataclasses import dataclass
+from typing import Sequence
+
+from ..canonical import canonical_sort, entity_id, qs
+from ..geometry.index import SpatialIndex
+from ..geometry.primitives import BBox, Segment, dist, point_segment_distance
+from ..model import (
+    Confidence,
+    Designation,
+    Provenance,
+    TextItem,
+    TokenStructure,
+    VectorObject,
+)
+from ..states import IdentityState, Reason, TextRole
+from ..text_reconstruction.tokens import token_structure
+from .legend import Panel
+
+# Nominal pipe sizes are bounded by physics, not by a catalogue: from the
+# smallest pipe a building service uses to a large culvert.  The bound only
+# rejects values that cannot be a nominal size at all; every candidate it does
+# admit is still reconciled against the *measured* drawn width later, and the
+# measurement wins on disagreement (see vvs_pipe.dimensions.parser).
+MIN_NOMINAL_MM = 10.0
+MAX_NOMINAL_MM = 3000.0
+
+LEADER_MIN_LENGTH_RATIO = 1.2   # of cap height
+LEADER_ATTACH_RATIO = 0.9       # of cap height
+NEAR_GEOMETRY_RATIO = 6.0       # of cap height
+
+_RATIO_RE = re.compile(r"(?<![\d.])1\s*:\s*(\d{1,5})(?![\d.])")
+_ELEVATION_RE = re.compile(r"^([A-ZÅÄÖ]{0,4})\s*([+\-])\s*(\d{1,3})[.,](\d{1,3})$")
+_EXPLICIT_DIAMETER_RE = re.compile(r"^(?:Ø|DN|D)\s*(\d{1,4})$", re.IGNORECASE)
+
+
+@dataclass(frozen=True, slots=True)
+class DesignationDiscovery:
+    designations: tuple[Designation, ...]
+    scale_notes: tuple[tuple[str, float], ...]
+    elevation_notes: tuple[tuple[str, float, BBox], ...]
+
+
+def _leader_candidates(objects: Sequence[VectorObject], cap: float) -> list[Segment]:
+    out: list[Segment] = []
+    for o in objects:
+        if not o.is_stroked or len(o.points) != 2:
+            continue
+        seg = Segment(o.points[0], o.points[1])
+        if seg.length >= LEADER_MIN_LENGTH_RATIO * cap:
+            out.append(seg)
+    return out
+
+
+def parse_ratio(text: str) -> float | None:
+    """Find a ``1:N`` drawing ratio anywhere in a string.
+
+    The note is normally embedded in other words ("SKALA 1:50", "SCALE 1:100"),
+    so the ratio is searched for rather than required to be the whole string.
+    The prefix word is never interpreted, so any language works.
+    """
+    m = _RATIO_RE.search(text)
+    if not m:
+        return None
+    den = int(m.group(1))
+    return float(den) if den > 0 else None
+
+
+def parse_elevation(text: str) -> float | None:
+    """Parse a height note such as ``VG+2.800`` into metres.
+
+    The alphabetic prefix is *not* interpreted - any prefix is accepted, so a
+    drawing that writes ``FG``, ``OK`` or nothing at all parses identically.
+    """
+    m = _ELEVATION_RE.match(text.replace(" ", "").upper())
+    if not m:
+        return None
+    sign = -1.0 if m.group(2) == "-" else 1.0
+    whole, frac = m.group(3), m.group(4)
+    return sign * (int(whole) + int(frac) / (10 ** len(frac)))
+
+
+def parse_nominal_size(token: str) -> float | None:
+    if not token.isdigit():
+        return None
+    v = float(token)
+    if MIN_NOMINAL_MM <= v <= MAX_NOMINAL_MM:
+        return v
+    return None
+
+
+def _code_like(parts: Sequence[tuple[str, str]]) -> bool:
+    """Does the token structure look like an engineering code?
+
+    Two or more alphanumeric runs joined by separators, at least one of which
+    contains a digit.  ``S1-P2-110``, ``KV1-X7``, ``ABC-17-X-250`` and
+    ``VP-003-A`` all satisfy this; ``TVATT`` and ``TECKENFORKLARING`` do not.
+    """
+    runs = [p for p in parts if p[0] in ("L", "D")]
+    seps = [p for p in parts if p[0] == "S" and p[1].strip()]
+    if len(runs) < 2 or not seps:
+        return False
+    return any(p[0] == "D" for p in runs)
+
+
+def discover_designations(
+    text_items: Sequence[TextItem],
+    objects: Sequence[VectorObject],
+    panels: Sequence[Panel],
+    page_box: BBox,
+    page: int,
+) -> DesignationDiscovery:
+    items = canonical_sort(list(text_items), key=lambda t: t.canonical_key())
+    caps = sorted(max(t.height, 1e-3) for t in items) or [7.0]
+    median_cap = caps[len(caps) // 2]
+
+    leaders = _leader_candidates(objects, median_cap)
+    leader_index: SpatialIndex[int] = SpatialIndex.for_items(
+        [(s.bbox, i) for i, s in enumerate(leaders)]
+    )
+    geom_index: SpatialIndex[int] = SpatialIndex.for_items(
+        [(o.bbox, i) for i, o in enumerate(objects) if o.is_stroked]
+    )
+
+    occurrences: dict[str, int] = {}
+    for t in items:
+        occurrences[t.text] = occurrences.get(t.text, 0) + 1
+
+    panel_of: dict[str, Panel] = {}
+    for p in panels:
+        for tid in p.text_item_ids:
+            panel_of[tid] = p
+
+    # A panel holding a scale ratio is a title block; a panel holding repeated
+    # code-like strings is a legend.  Both are derived, never assumed.
+    title_panels: set[str] = set()
+    for p in panels:
+        for tid in p.text_item_ids:
+            item = next((t for t in items if t.text_id == tid), None)
+            if item is not None and parse_ratio(item.text) is not None:
+                title_panels.add(p.panel_id)
+
+    scale_notes: list[tuple[str, float]] = []
+    elevation_notes: list[tuple[str, float, BBox]] = []
+    designations: list[Designation] = []
+
+    for t in items:
+        parts, pattern = token_structure(t.text)
+        structure = TokenStructure(parts=parts, pattern=pattern)
+        cap = max(t.height, 1e-3)
+        panel = panel_of.get(t.text_id)
+        in_panel = panel is not None
+        in_title = bool(panel and panel.panel_id in title_panels)
+
+        ratio = parse_ratio(t.text)
+        elevation = parse_elevation(t.text)
+        if ratio is not None:
+            scale_notes.append((t.text, ratio))
+        if elevation is not None:
+            elevation_notes.append((t.text, elevation, t.bbox))
+
+        probe = t.bbox.expanded(LEADER_ATTACH_RATIO * cap)
+        has_leader = False
+        leader_len = 0.0
+        for li in leader_index.query_box(probe):
+            s = leaders[li]
+            for end in (s.a, s.b):
+                if probe.contains_point(end) and not t.bbox.expanded(-0.1).contains_point(
+                    s.b if end is s.a else s.a
+                ):
+                    has_leader = True
+                    leader_len = max(leader_len, s.length)
+        near_r = NEAR_GEOMETRY_RATIO * cap
+        near_geometry = 0
+        for oi in geom_index.query_box(t.bbox.expanded(near_r)):
+            o = objects[oi]
+            if o.bbox.area > page_box.area * 0.25:
+                continue
+            if any(point_segment_distance(t.bbox.center, s) <= near_r for s in o.segments()):
+                near_geometry += 1
+
+        code_like = _code_like(parts)
+        letters_only = all(p[0] == "L" or not p[1].strip() for p in parts)
+        digits_only = all(p[0] == "D" or not p[1].strip() for p in parts)
+        explicit_d = _EXPLICIT_DIAMETER_RE.match(t.text.replace(" ", ""))
+        repetition = occurrences.get(t.text, 1)
+
+        scores: dict[TextRole, float] = {r: 0.0 for r in TextRole}
+        scores[TextRole.IRRELEVANT] = 0.12
+        if ratio is not None:
+            scores[TextRole.SCALE_NOTE] = 0.97
+        if elevation is not None:
+            scores[TextRole.ELEVATION] = 0.95
+        if explicit_d or (digits_only and parse_nominal_size(t.text.strip()) is not None and len(t.text.strip()) >= 2):
+            scores[TextRole.DIMENSION] = 0.8 if explicit_d else 0.45
+        if code_like:
+            base = 0.45
+            base += 0.22 if has_leader else 0.0
+            base += 0.12 if near_geometry else 0.0
+            base += 0.08 if repetition > 1 else 0.0
+            base -= 0.30 if in_panel else 0.0
+            scores[TextRole.PIPE_DESIGNATION] = max(0.0, min(0.99, base))
+            legend_score = 0.30
+            legend_score += 0.45 if in_panel and not in_title else 0.0
+            legend_score += 0.10 if repetition > 1 else 0.0
+            legend_score -= 0.25 if has_leader else 0.0
+            scores[TextRole.LEGEND_ENTRY] = max(0.0, min(0.99, legend_score))
+            if in_title:
+                scores[TextRole.REFERENCE] = 0.55
+        elif letters_only and len(t.text.strip()) >= 2:
+            scores[TextRole.ROOM_LABEL] = 0.55 if not in_panel else 0.2
+            if in_panel:
+                scores[TextRole.TITLE_BLOCK if in_title else TextRole.LEGEND_ENTRY] = 0.6
+        elif in_panel:
+            scores[TextRole.TITLE_BLOCK if in_title else TextRole.LEGEND_ENTRY] = 0.5
+
+        if t.state is IdentityState.UNRESOLVED:
+            scores = {r: 0.0 for r in TextRole}
+            scores[TextRole.IRRELEVANT] = 0.9
+
+        ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0].value))
+        role, role_score = ranked[0]
+        role_scores = tuple((r.value, qs(v)) for r, v in ranked if v > 0.0)
+
+        if code_like or explicit_d:
+            diameter, diameter_reason, system_token = _dimension_from_structure(parts, explicit_d)
+        else:
+            diameter, diameter_reason, system_token = None, None, None
+
+        reasons: list[Reason] = []
+        if role is TextRole.LEGEND_ENTRY:
+            reasons.append(Reason.LEGEND_INSTANCE)
+        if diameter is None and role is TextRole.PIPE_DESIGNATION:
+            reasons.append(diameter_reason or Reason.NO_DIMENSION_EVIDENCE)
+
+        if role is TextRole.PIPE_DESIGNATION and role_score >= 0.72 and t.state is not IdentityState.AMBIGUOUS:
+            state = IdentityState.CONFIRMED
+        elif role_score >= 0.5:
+            state = IdentityState.HIGH_CONFIDENCE
+        elif role_score > 0.0:
+            state = IdentityState.AMBIGUOUS
+        else:
+            state = IdentityState.UNRESOLVED
+
+        designations.append(
+            Designation(
+                designation_id=entity_id("des", (page, t.bbox.key(), t.text)),
+                page=page,
+                text=t.text,
+                bbox=t.bbox,
+                role=role,
+                role_scores=role_scores,
+                is_legend=role is TextRole.LEGEND_ENTRY,
+                structure=structure,
+                diameter_mm=diameter,
+                diameter_reason=diameter_reason,
+                system_token=system_token,
+                text_item_id=t.text_id,
+                glyph_ids=t.glyph_ids,
+                source_object_ids=t.source_object_ids,
+                confidence=Confidence(
+                    text=t.confidence,
+                    geometry=qs(min(1.0, 0.4 + 0.15 * near_geometry + (0.3 if has_leader else 0.0))),
+                    dimension=None if diameter is None else 0.9,
+                ),
+                state=state,
+                reasons=tuple(reasons),
+                associated_physical_pipe_ids=(),
+                provenance=Provenance(
+                    stage="designation",
+                    rule="open-world token structure + local geometry scoring",
+                    inputs=(t.text_id,),
+                    source_object_ids=t.source_object_ids,
+                    notes=(
+                        f"pattern={pattern}",
+                        f"inPanel={in_panel}",
+                        f"hasLeader={has_leader}",
+                        f"nearGeometry={near_geometry}",
+                        f"occurrences={repetition}",
+                    ),
+                ),
+            )
+        )
+
+    designations = canonical_sort(designations, key=lambda d: d.canonical_key())
+    return DesignationDiscovery(
+        designations=tuple(designations),
+        scale_notes=tuple(sorted(set(scale_notes))),
+        elevation_notes=tuple(
+            sorted(elevation_notes, key=lambda e: (e[2].key(), e[0]))
+        ),
+    )
+
+
+def _dimension_from_structure(
+    parts: Sequence[tuple[str, str]], explicit
+) -> tuple[float | None, Reason | None, str | None]:
+    """Derive a nominal size from the token structure, generically.
+
+    The rule is positional, not lexical: the *last* purely numeric run of a
+    code-like string is the nominal size when its value is physically
+    plausible.  ``S1-P2-110`` yields 110, ``KV1-X7`` yields nothing (7 is below
+    any plausible nominal size), ``ABC-17-X-250`` yields 250.  No token value
+    is special-cased anywhere.
+    """
+    if explicit:
+        return float(explicit.group(1)), None, None
+    runs = [p for p in parts if p[0] in ("L", "D")]
+    if not runs:
+        return None, Reason.NO_DIMENSION_EVIDENCE, None
+    system = runs[0][1] if runs[0][0] == "L" or any(c.isalpha() for c in runs[0][1]) else None
+    numeric_runs = [p[1] for p in runs if p[0] == "D"]
+    if not numeric_runs:
+        return None, Reason.NO_DIMENSION_EVIDENCE, system
+    size = parse_nominal_size(numeric_runs[-1])
+    if size is None:
+        return None, Reason.NO_DIMENSION_EVIDENCE, system
+    return size, None, system

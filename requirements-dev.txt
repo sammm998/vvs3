@@ -1,0 +1,6 @@
+-r requirements.txt
+pytest==8.3.4
+# openpyxl is used ONLY by the post-hoc evaluator (vvs_pipe.evaluation) and by
+# fixture tooling. It must never be reachable from the blind pipeline import
+# closure - see tests/python/test_blind_leakage.py.
+openpyxl==3.1.5
