@@ -287,6 +287,15 @@ def extract_document(
                     # flag says - CAD exporters commonly emit the repeated
                     # point instead of the operator.
                     closed = closed or close_path or (len(pts) > 2 and pts[0] == pts[-1])
+                    if closed:
+                        # A contour that encloses no area is a stroke that was
+                        # merely closed back onto itself, not a symbol; treating
+                        # it as closed would hide real geometry from the pipe
+                        # stages.
+                        box = BBox.from_points(pts)
+                        if min(box.width, box.height) <= cfg.min_object_extent_pt:
+                            closed = False
+                            pts = pts[:-1] if pts[0] == pts[-1] and len(pts) > 2 else pts
                     if closed and len(pts) > 2 and pts[0] != pts[-1]:
                         pts = pts + [pts[0]]
                     box = BBox.from_points(pts)

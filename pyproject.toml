@@ -30,4 +30,4 @@ where = ["src/python"]
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
 pythonpath = ["src/python", "."]
-addopts = "-q"
+addopts = "-q -p no:warnings"

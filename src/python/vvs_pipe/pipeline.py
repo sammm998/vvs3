@@ -156,7 +156,22 @@ def analyse(
 
     forensics = forensic_report(pdf_path, cfg.extraction)
     doc = extract_document(pdf_path, cfg.extraction)
+    return analyse_extracted(doc, forensics, str(pdf_path), cfg, blind)
 
+
+def analyse_extracted(
+    doc: VectorDocument,
+    forensics: ForensicReport,
+    source_path: str,
+    cfg: PipelineConfig | None = None,
+    blind: bool = False,
+) -> AnalysisResult:
+    """Analyse an already-extracted document.
+
+    Split out from :func:`analyse` so the order-independence tests can feed the
+    same document with its object list permuted and compare canonical digests.
+    """
+    cfg = cfg or PipelineConfig()
     pages: list[PageResult] = []
     for page_info in doc.pages:
         pages.append(_analyse_page(doc, page_info.page, page_info, cfg))
@@ -170,7 +185,7 @@ def analyse(
         quantities,
     )
     return AnalysisResult(
-        source_path=str(pdf_path),
+        source_path=source_path,
         forensics=forensics,
         document=doc,
         pages=pages,
