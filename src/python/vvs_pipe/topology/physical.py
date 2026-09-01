@@ -13,6 +13,7 @@ out.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -59,14 +60,31 @@ def build_physical_pipes(
             ql(a.diameter_mm) if a and a.diameter_mm is not None else -1.0,
         )
 
-    edges: list[tuple[int, int]] = []
-    for i in range(len(ordered)):
-        for j in range(i + 1, len(ordered)):
-            if group_key(ordered[i]) != group_key(ordered[j]):
-                continue
-            if _touching(ordered[i].centerline, ordered[j].centerline):
-                edges.append((i, j))
-    comps = connected_components(len(ordered), edges)
+    # Endpoints are bucketed on a grid whose cell is the join tolerance, so
+    # only runs that could actually touch are ever compared.  Complexity is
+    # O(n) buckets plus the pairs inside them, not O(n^2).
+    buckets: dict[tuple, list[int]] = {}
+    for i, r in enumerate(ordered):
+        for p in (r.centerline[0], r.centerline[-1]):
+            cell = (
+                int(math.floor(p[0] / JOIN_TOLERANCE_PT)),
+                int(math.floor(p[1] / JOIN_TOLERANCE_PT)),
+            )
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    buckets.setdefault((group_key(r), cell[0] + dx, cell[1] + dy), []).append(i)
+
+    edges: set[tuple[int, int]] = set()
+    for key in sorted(buckets, key=lambda k: (str(k[0]), k[1], k[2])):
+        members = sorted(set(buckets[key]))
+        for a_pos in range(len(members)):
+            for b_pos in range(a_pos + 1, len(members)):
+                i, j = members[a_pos], members[b_pos]
+                if group_key(ordered[i]) != group_key(ordered[j]):
+                    continue
+                if _touching(ordered[i].centerline, ordered[j].centerline):
+                    edges.add((i, j))
+    comps = connected_components(len(ordered), sorted(edges))
 
     out: list[PhysicalPipe] = []
     for comp in comps:

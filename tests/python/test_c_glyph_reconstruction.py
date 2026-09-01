@@ -113,7 +113,7 @@ def test_alphabet_assignment_is_order_independent(drawing_a):
             key=(g.bbox.key(), g.object_ids),
             raster=rasterise_polylines(g.polylines, g.filled),
             rel_height=g.bbox.height / max(line.cap_height, 1e-6),
-            rel_base=(line.bbox.y1 - g.bbox.y1) / max(line.cap_height, 1e-6),
+            rel_base=(line.baseline_y - g.bbox.y1) / max(line.cap_height, 1e-6),
         )
         for line in seg.lines
         if len(line.glyphs) >= 2

@@ -107,10 +107,18 @@ def detect_pipes(
     # Pre-pass: every closed contour small enough to be a drawing symbol.  This
     # is collected before any filtering so that whether a stroke is recognised
     # as symbol furniture cannot depend on the order objects are visited in.
+    #
+    # Geometry the text stages already claimed is excluded: characters such as
+    # O, 0, 8 and Ø are closed contours of exactly this size, and letting them
+    # through would present every one of them to the vertical analysis as a
+    # riser symbol.
     symbol_boxes = [
         o.bbox
         for o in ordered
         if o.closed
+        and o.object_id not in consumed_by_text
+        and o.object_id not in explained_object_ids
+        and not any(p.contains_box(o.bbox) for p in panel_boxes)
         and o.bbox.area < cfg.sheet_frame_area_ratio * page_box.area
         and max(o.bbox.width, o.bbox.height) <= 6.0 * max(text_cap_height, 1.0)
     ]

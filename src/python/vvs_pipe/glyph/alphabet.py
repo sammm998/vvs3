@@ -24,6 +24,7 @@ glyphs are reported UNRESOLVED_GLYPH rather than forced onto a character.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -36,7 +37,13 @@ from .features import GlyphRaster, chamfer, jaccard_distance
 CLUSTER_CHAMFER_MAX = 0.55
 CLUSTER_JACCARD_MAX = 0.22
 CLUSTER_RELHEIGHT_MAX = 0.18
+# Cheap pre-filter before the expensive shape measures: two renderings of the
+# same character have almost identical coarse ink distributions.
+SIGNATURE_L1_MAX = 0.35
 REJECT_COST = 3.4
+# How much a maximally-supported cluster's regret is amplified, used only to
+# decide otherwise-tied assignments deterministically by weight of evidence.
+REGRET_EVIDENCE_GAIN = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,26 +94,43 @@ def _same_shape(a: GlyphObservation, b: GlyphObservation) -> bool:
 def cluster_glyphs(observations: Sequence[GlyphObservation]) -> list[list[int]]:
     """Agglomerate glyph instances by normalised shape.
 
-    Blocking on the hole count and the relative height keeps this far below the
-    O(n^2) worst case on real sheets; within a block the pairwise test is
-    symmetric, so the resulting partition does not depend on input order.
+    Exact transitive clustering (two glyphs join one cluster if a chain of
+    matches links them), which is what makes the partition independent of the
+    order the glyphs arrive in.  The cost is kept down by a two-stage filter
+    rather than by weakening the criterion:
+
+    1. glyphs are blocked by enclosed-hole count;
+    2. inside a block a cheap 4x4 ink-density signature distance is evaluated
+       for all pairs at once with numpy, and only the survivors pay for the
+       chamfer and Jaccard measures.
+
+    On a sheet with a few thousand glyphs this turns a quadratic number of
+    expensive comparisons into a quadratic number of *vectorised* ones plus a
+    linear number of expensive ones.
     """
     from ..geometry.index import connected_components
 
     n = len(observations)
-    blocks: dict[tuple[int, int], list[int]] = {}
+    if n == 0:
+        return []
+
+    signatures = np.array([o.raster.signature() for o in observations], dtype=np.float32)
+    blocks: dict[int, list[int]] = {}
     for i, o in enumerate(observations):
-        blocks.setdefault((o.raster.holes, int(round(o.rel_height / CLUSTER_RELHEIGHT_MAX))), []).append(i)
-    # A glyph near a block boundary must be comparable with its neighbours, so
-    # each glyph is also tested against the adjacent height bucket.
+        blocks.setdefault(o.raster.holes, []).append(i)
+
     edges: list[tuple[int, int]] = []
-    for (holes, bucket), members in sorted(blocks.items()):
-        neighbours = sorted(set(members) | set(blocks.get((holes, bucket + 1), [])))
-        for ai in range(len(neighbours)):
-            for bi in range(ai + 1, len(neighbours)):
-                i, j = neighbours[ai], neighbours[bi]
+    for holes in sorted(blocks):
+        members = blocks[holes]
+        if len(members) < 2:
+            continue
+        sub = signatures[np.array(members, dtype=np.int64)]
+        for a_pos in range(len(members)):
+            deltas = np.abs(sub[a_pos + 1 :] - sub[a_pos]).sum(axis=1)
+            for offset in np.nonzero(deltas <= SIGNATURE_L1_MAX)[0].tolist():
+                i, j = members[a_pos], members[a_pos + 1 + offset]
                 if _same_shape(observations[i], observations[j]):
-                    edges.append((i, j))
+                    edges.append((i, j) if i < j else (j, i))
     return connected_components(n, edges)
 
 
@@ -136,16 +160,17 @@ def resolve_alphabet(
         for m in members:
             cluster_of[obs[m].key] = ci
 
-    # Aggregate the per-character distance over every instance of a cluster.
+    # One distance vector per *cluster*, not per instance.  Every member of a
+    # cluster has the same normalised shape by construction, so the shape
+    # evidence is identical; the typographic metrics that do vary between
+    # instances are averaged first.  This is what stops a sheet with thousands
+    # of glyphs from paying for thousands of prototype sweeps.
     per_cluster: list[dict[str, float]] = []
     for members in comps:
-        acc: dict[str, float] = {}
-        for m in members:
-            o = obs[m]
-            for ch, d in glyph_distance_vector(o.raster, o.rel_height, o.rel_base).items():
-                acc[ch] = acc.get(ch, 0.0) + d
-        n = float(len(members))
-        per_cluster.append({ch: v / n for ch, v in acc.items()})
+        rep = obs[members[0]]
+        rel_h = sum(obs[m].rel_height for m in members) / len(members)
+        rel_b = sum(obs[m].rel_base for m in members) / len(members)
+        per_cluster.append(glyph_distance_vector(rep.raster, rel_h, rel_b))
 
     chars = sorted({ch for row in per_cluster for ch in row})
     n_clusters = len(per_cluster)
@@ -156,7 +181,25 @@ def resolve_alphabet(
     for i, row in enumerate(per_cluster):
         for j, ch in enumerate(chars):
             cost[i, j] = row.get(ch, REJECT_COST)
-    rows, cols = linear_sum_assignment(cost)
+
+    # Exact ties are common here and the solver would otherwise break them
+    # arbitrarily.  "Give 1 to the cluster of 369 glyphs and I to the cluster
+    # of one" and its reverse can score exactly the same total, and picking
+    # either at random is the arbitrary tie-break this engine forbids - with
+    # 369 characters riding on it.
+    #
+    # So what is minimised is *regret* - how much worse than its own best match
+    # a cluster is forced to accept - with each cluster's regret amplified by
+    # how much evidence stands behind it.  A tie is then always resolved in
+    # favour of the better-supported cluster, and the amplification is far too
+    # small to overturn a decision the shape evidence actually settles.
+    sizes = np.array([len(members) for members in comps], dtype=np.float64)
+    span = math.log1p(float(sizes.max())) if sizes.size else 1.0
+    weight = (np.log1p(sizes) / span) if span > 0 else np.zeros_like(sizes)
+    best_per_cluster = cost[:, :n_chars].min(axis=1) if n_chars else np.zeros(n_clusters)
+    regret = cost - best_per_cluster[:, None]
+    scaled = best_per_cluster[:, None] + regret * (1.0 + REGRET_EVIDENCE_GAIN * weight[:, None])
+    rows, cols = linear_sum_assignment(scaled)
 
     character_of: dict[int, str | None] = {}
     confidence_of: dict[int, float] = {}

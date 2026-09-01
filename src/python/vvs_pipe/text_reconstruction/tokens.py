@@ -77,7 +77,7 @@ def _observation(line: TextLine, glyph) -> GlyphObservation:
         key=(glyph.bbox.key(), glyph.object_ids),
         raster=rasterise_polylines(glyph.polylines, glyph.filled),
         rel_height=glyph.bbox.height / max(line.cap_height, 1e-6),
-        rel_base=(line.bbox.y1 - glyph.bbox.y1) / max(line.cap_height, 1e-6),
+        rel_base=(line.baseline_y - glyph.bbox.y1) / max(line.cap_height, 1e-6),
     )
 
 

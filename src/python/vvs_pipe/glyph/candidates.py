@@ -48,6 +48,7 @@ class TextLine:
     rotation_deg: float
     cap_height: float
     baseline_offset: float
+    baseline_y: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +188,13 @@ def segment_glyphs(
         if cur:
             groups.append(cur)
 
+        # The provisional cap height above is the blob's full perpendicular
+        # extent, which one stray tick mark beside the text is enough to
+        # inflate - and every glyph's height and baseline feature is measured
+        # against it.  Once the glyphs are separated the cap is re-estimated
+        # from the *distribution* of glyph heights, which a few outliers cannot
+        # move.  Same for the baseline: it is the level the full-height
+        # characters sit on, not the lowest ink in the blob.
         glyphs: list[GlyphGroup] = []
         for order, g in enumerate(groups):
             polys = tuple(tuple(o.points) for o in g)
@@ -208,14 +216,21 @@ def segment_glyphs(
         if not glyphs:
             continue
         box = BBox.union_all([g.bbox for g in glyphs])
-        baseline = max(perp)
+        heights = sorted(g.bbox.height for g in glyphs)
+        robust_cap = heights[int(0.75 * (len(heights) - 1))] if heights else 0.0
+        if robust_cap >= cfg.min_cap_height_pt:
+            cap = robust_cap
+        tall = [g for g in glyphs if g.bbox.height >= 0.7 * cap]
+        bottoms = sorted((g.bbox.y1 for g in tall) or (g.bbox.y1 for g in glyphs))
+        baseline_y = bottoms[len(bottoms) // 2] if bottoms else box.y1
         lines.append(
             TextLine(
                 glyphs=tuple(glyphs),
                 bbox=box,
                 rotation_deg=math.degrees(theta),
                 cap_height=cap,
-                baseline_offset=baseline,
+                baseline_offset=max(perp),
+                baseline_y=baseline_y,
             )
         )
         for g in glyphs:

@@ -244,18 +244,36 @@ def _propagate(
     awarded to either.
     """
     adjacency: dict[str, list[str]] = {r.pipe_run_id: [] for r in runs}
-    for i in range(len(runs)):
-        for j in range(i + 1, len(runs)):
-            a, b = runs[i], runs[j]
-            if not _width_compatible(a, b):
-                continue
-            if any(
-                dist(pa, pb) <= RUN_JOIN_TOLERANCE_PT
-                for pa in (a.centerline[0], a.centerline[-1])
-                for pb in (b.centerline[0], b.centerline[-1])
-            ):
-                adjacency[a.pipe_run_id].append(b.pipe_run_id)
-                adjacency[b.pipe_run_id].append(a.pipe_run_id)
+    # Bucket run endpoints on a grid of the join tolerance so only runs that
+    # could touch are compared - linear in the number of runs, not quadratic.
+    buckets: dict[tuple[int, int], list[int]] = {}
+    for i, r in enumerate(runs):
+        for p in (r.centerline[0], r.centerline[-1]):
+            cx = int(math.floor(p[0] / RUN_JOIN_TOLERANCE_PT))
+            cy = int(math.floor(p[1] / RUN_JOIN_TOLERANCE_PT))
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    buckets.setdefault((cx + dx, cy + dy), []).append(i)
+
+    seen: set[tuple[int, int]] = set()
+    for cell in sorted(buckets):
+        members = sorted(set(buckets[cell]))
+        for a_pos in range(len(members)):
+            for b_pos in range(a_pos + 1, len(members)):
+                i, j = members[a_pos], members[b_pos]
+                if (i, j) in seen:
+                    continue
+                seen.add((i, j))
+                a, b = runs[i], runs[j]
+                if not _width_compatible(a, b):
+                    continue
+                if any(
+                    dist(pa, pb) <= RUN_JOIN_TOLERANCE_PT
+                    for pa in (a.centerline[0], a.centerline[-1])
+                    for pb in (b.centerline[0], b.centerline[-1])
+                ):
+                    adjacency[a.pipe_run_id].append(b.pipe_run_id)
+                    adjacency[b.pipe_run_id].append(a.pipe_run_id)
 
     by_id = {r.pipe_run_id: r for r in runs}
     depth: dict[str, int] = {}
