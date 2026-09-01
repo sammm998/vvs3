@@ -263,10 +263,30 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     STORAGE.mkdir(parents=True, exist_ok=True)
+
+    # Fail loudly and early if the engine cannot be imported: a container that
+    # starts, serves 404s and only breaks on the first upload is far harder to
+    # diagnose than one that refuses to start.
+    try:
+        import vvs_pipe  # noqa: F401
+    except Exception as err:  # pragma: no cover - deployment diagnostics
+        sys.stderr.write(f"FATAL: analysis engine failed to import: {err!r}\n")
+        sys.stderr.write("Check that requirements.txt was installed in this image.\n")
+        return 1
+
     threading.Thread(target=_worker, name="vvs-worker", daemon=True).start()
-    port = int(os.environ.get("PORT", "8080"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    sys.stdout.write(f"vvs-pipe listening on http://0.0.0.0:{port}\n")
+
+    # PaaS platforms inject the port to listen on.  When they do not, 8080 is
+    # the conventional default and is what the platform's generated domain
+    # targets unless it is told otherwise.
+    port = int(os.environ.get("PORT") or 8080)
+    host = os.environ.get("HOST", "0.0.0.0")
+    server = ThreadingHTTPServer((host, port), Handler)
+    sys.stdout.write(
+        f"vvs-pipe listening on http://{host}:{port} "
+        f"(PORT env {'set' if os.environ.get('PORT') else 'not set, defaulted'}); "
+        f"health check at /healthz; storage {STORAGE}\n"
+    )
     sys.stdout.flush()
     try:
         server.serve_forever()

@@ -91,6 +91,24 @@ python main.py                 # http://localhost:8080 - no build step
 npm install && npm run serve   # http://localhost:8080 - typed TS layer
 ```
 
+#### Deploying
+
+`railway.json` and `railpack.json` declare the build and start command, and the
+service exposes `/healthz`. If the platform's generated domain returns the
+edge's own "Not Found" page while the deployment reports *Online*, the app is
+running but the domain has no **target port** pointing at it:
+
+* Railway → the service → **Settings → Networking → Public Networking** → set
+  the generated domain's target port to **8080** (or add a `PORT` variable and
+  the app will bind to that instead), then redeploy;
+* **Deploy Logs** should show `vvs-pipe listening on http://0.0.0.0:<port>`.
+  If it shows `FATAL: analysis engine failed to import`, the image did not
+  install `requirements.txt`.
+
+Job artifacts are written under `artifacts/jobs` (override with `VVS_STORAGE`).
+That path is inside the container, so attach a volume if analyses must survive
+a redeploy. A large sheet needs roughly 1-2 GB of RAM while it is analysed.
+
 `main.py` is the **deployment entry point**: pure standard library plus the
 engine, so a PaaS that detects Python (Railway/Railpack, Heroku, Fly, Render)
 runs it with no Node build. `railpack.json` and `Procfile` both declare
