@@ -45,6 +45,8 @@ DIST_UI = ROOT / "dist" / "ui"
 MAX_UPLOAD_BYTES = int(os.environ.get("VVS_MAX_UPLOAD_BYTES", 128 * 1024 * 1024))
 ARTIFACTS = ("analysis.json", "forensics.json", "marked.pdf", "debug.pdf", "quantities.csv")
 
+ENGINE_ERROR: str | None = None
+
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 _work: "queue.Queue[str]" = queue.Queue()
@@ -214,7 +216,15 @@ class Handler(BaseHTTPRequestHandler):
         parts = [p for p in url.path.split("/") if p]
 
         if url.path in ("/healthz", "/health"):
-            self._json(200, {"ok": True, "queued": _work.qsize()})
+            self._json(
+                200,
+                {
+                    "ok": ENGINE_ERROR is None,
+                    "queued": _work.qsize(),
+                    "engineError": ENGINE_ERROR,
+                    "storage": str(STORAGE),
+                },
+            )
             return
         if url.path == "/api/jobs":
             self._json(200, {"jobs": _list_jobs(), "queueSize": _work.qsize()})
@@ -264,15 +274,17 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     STORAGE.mkdir(parents=True, exist_ok=True)
 
-    # Fail loudly and early if the engine cannot be imported: a container that
-    # starts, serves 404s and only breaks on the first upload is far harder to
-    # diagnose than one that refuses to start.
+    # Report a broken engine through the health endpoint rather than exiting.
+    # A container that exits restarts, and a restart loop looks identical from
+    # the outside to a routing problem; staying up and saying what is wrong
+    # keeps the two distinguishable.
+    global ENGINE_ERROR
     try:
         import vvs_pipe  # noqa: F401
     except Exception as err:  # pragma: no cover - deployment diagnostics
-        sys.stderr.write(f"FATAL: analysis engine failed to import: {err!r}\n")
-        sys.stderr.write("Check that requirements.txt was installed in this image.\n")
-        return 1
+        ENGINE_ERROR = repr(err)
+        sys.stderr.write(f"ERROR: analysis engine failed to import: {ENGINE_ERROR}\n")
+        sys.stderr.write("Uploads will fail until requirements.txt is installed.\n")
 
     threading.Thread(target=_worker, name="vvs-worker", daemon=True).start()
 

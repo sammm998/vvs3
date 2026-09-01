@@ -93,17 +93,22 @@ npm install && npm run serve   # http://localhost:8080 - typed TS layer
 
 #### Deploying
 
-`railway.json` and `railpack.json` declare the build and start command, and the
-service exposes `/healthz`. If the platform's generated domain returns the
-edge's own "Not Found" page while the deployment reports *Online*, the app is
-running but the domain has no **target port** pointing at it:
+The repository ships a `Dockerfile`, and `railway.json` selects it, so the
+interpreter, the dependencies and the listening port are fixed rather than
+guessed by a build pack. The image `EXPOSE`s **8080**, checks at build time
+that the engine imports, and the service answers `/healthz`.
 
-* Railway → the service → **Settings → Networking → Public Networking** → set
-  the generated domain's target port to **8080** (or add a `PORT` variable and
-  the app will bind to that instead), then redeploy;
-* **Deploy Logs** should show `vvs-pipe listening on http://0.0.0.0:<port>`.
-  If it shows `FATAL: analysis engine failed to import`, the image did not
-  install `requirements.txt`.
+If the platform's generated domain returns the edge's own "Not Found" page
+while the deployment reports *Online*, the app is running but the domain is not
+pointed at it. The service never exits on a bad import - it reports the problem
+through `/healthz` instead - so a 404 from the edge is always a routing problem:
+
+* Railway → the service → **Settings → Networking → Public Networking** → the
+  generated domain needs **target port 8080**. Delete and re-add the domain if
+  it was created before the port existed;
+* **Deploy Logs** should show `vvs-pipe listening on http://0.0.0.0:8080`;
+* `GET /healthz` returns `{"ok": true, ...}`, or `ok:false` with `engineError`
+  set if the image is missing dependencies.
 
 Job artifacts are written under `artifacts/jobs` (override with `VVS_STORAGE`).
 That path is inside the container, so attach a volume if analyses must survive
