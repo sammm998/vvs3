@@ -32,7 +32,7 @@ from ..model import (
     TokenStructure,
     VectorObject,
 )
-from ..states import IdentityState, Reason, TextRole
+from ..states import DesignationTier, IdentityState, Reason, TextRole
 from ..text_reconstruction.tokens import token_structure
 from .legend import Panel
 
@@ -300,9 +300,12 @@ def discover_designations(
         if diameter is None and role is TextRole.PIPE_DESIGNATION:
             reasons.append(diameter_reason or Reason.NO_DIMENSION_EVIDENCE)
 
-        if role is TextRole.PIPE_DESIGNATION and role_score >= 0.72 and t.state is not IdentityState.AMBIGUOUS:
-            state = IdentityState.CONFIRMED
-        elif role_score >= 0.5:
+        # Deliberately no CONFIRMED here.  Confirmation means a pipe accepted
+        # this label, and no pipe has been looked at yet: that decision belongs
+        # to vvs_pipe.designations.promote, after the geometry has spoken.  The
+        # ceiling at this stage is HIGH_CONFIDENCE however well the string is
+        # spelled.
+        if role_score >= 0.5:
             state = IdentityState.HIGH_CONFIDENCE
         elif role_score > 0.0:
             state = IdentityState.AMBIGUOUS
@@ -334,6 +337,11 @@ def discover_designations(
                 state=state,
                 reasons=tuple(reasons),
                 associated_physical_pipe_ids=(),
+                tier=(
+                    DesignationTier.DESIGNATION_CANDIDATE
+                    if role is TextRole.PIPE_DESIGNATION and role is not TextRole.LEGEND_ENTRY
+                    else DesignationTier.TEXT_ONLY
+                ),
                 provenance=Provenance(
                     stage="designation",
                     rule="open-world token structure + local geometry scoring",

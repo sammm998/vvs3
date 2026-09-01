@@ -15,7 +15,7 @@ from typing import Any, Sequence
 
 from .canonical import ql, qc, qs, entity_id, polyline_key
 from .geometry.primitives import BBox, Segment, polyline_length
-from .states import IdentityState, Reason, ScaleState, TextRole
+from .states import DesignationTier, IdentityState, Reason, ScaleState, TextRole
 
 Pt = tuple[float, float]
 
@@ -362,6 +362,11 @@ class Designation:
     reasons: tuple[Reason, ...]
     associated_physical_pipe_ids: tuple[str, ...]
     provenance: Provenance
+    # How far this text got towards actually being a pipe designation.  It is
+    # never CONFIRMED_DESIGNATION at the point the text is read: confirmation
+    # requires a pipe, and pipes are found later and independently.
+    tier: DesignationTier = DesignationTier.TEXT_ONLY
+    pipe_evidence: tuple[tuple[str, float], ...] = ()
 
     def canonical_key(self) -> tuple:
         return (self.page, self.bbox.key(), self.text)
@@ -387,6 +392,8 @@ class Designation:
             "state": self.state.value,
             "reasons": [r.value for r in self.reasons],
             "associatedPhysicalPipeIds": sorted(self.associated_physical_pipe_ids),
+            "tier": self.tier.value,
+            "pipeEvidence": [[k, qs(v)] for k, v in self.pipe_evidence],
             "provenance": self.provenance.to_canonical(),
         }
 

@@ -36,13 +36,20 @@ def dedupe_candidates(
 def _collapse_exact(
     candidates: Sequence[PipeCandidate],
 ) -> tuple[list[PipeCandidate], int]:
+    # Keyed on the width as well as the canonical key.  Two pairings that share
+    # a centerline and a style but not a separation are *not* the same
+    # candidate - one is a pipe and the other its jacket - and collapsing them
+    # here would throw one of the two widths away before the concentric pass
+    # could record both.
     groups: dict[tuple, list[PipeCandidate]] = {}
     for c in candidates:
-        groups.setdefault(c.canonical_key(), []).append(c)
+        groups.setdefault(
+            (c.canonical_key(), -1.0 if c.width_pt is None else round(c.width_pt, 4)), []
+        ).append(c)
 
     out: list[PipeCandidate] = []
     removed = 0
-    for key in sorted(groups, key=lambda k: canonical_json(_key_repr(k))):
+    for key in sorted(groups, key=lambda k: canonical_json([_key_repr(k[0]), k[1]])):
         members = canonical_sort(groups[key], key=lambda c: canonical_json(c.to_canonical()))
         keeper = members[0]
         if len(members) == 1:

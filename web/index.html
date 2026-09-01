@@ -3,50 +3,132 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>VVS pipe take-off</title>
-    <style>
-      :root { color-scheme: light dark; --line: #8884; }
-      * { box-sizing: border-box; }
-      body { margin: 0; font: 13px/1.55 ui-sans-serif, system-ui, sans-serif; }
-      header { display: flex; gap: .9rem; align-items: center; flex-wrap: wrap;
-               padding: .7rem 1rem; border-bottom: 1px solid var(--line); }
-      h1 { font-size: 15px; margin: 0; font-weight: 650; }
-      main { display: grid; grid-template-columns: 1fr minmax(340px, 460px); gap: 1rem; padding: 1rem; align-items: start; }
-      @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
-      iframe { width: 100%; height: 74vh; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
-      section { border: 1px solid var(--line); border-radius: 6px; padding: .75rem; margin-bottom: 1rem; }
-      section > h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; margin: 0 0 .5rem; opacity: .7; }
-      table { width: 100%; border-collapse: collapse; font-size: 12px; }
-      th, td { text-align: left; padding: .25rem .4rem; border-bottom: 1px solid var(--line); vertical-align: top; }
-      th { font-weight: 600; opacity: .75; }
-      .kv { display: flex; justify-content: space-between; gap: 1rem; }
-      .kv span { opacity: .7; }
-      pre { margin: 0; font-size: 11px; max-height: 9rem; overflow: auto; opacity: .8; white-space: pre-wrap; }
-      label.file, a.dl { border: 1px solid var(--line); border-radius: 5px; padding: .3rem .6rem; cursor: pointer; text-decoration: none; color: inherit; }
-      #status { opacity: .8; }
-      .warn { color: #c65; }
-    </style>
+    <title>VVS take-off</title>
+    <link rel="stylesheet" href="./app.css" />
   </head>
   <body>
-    <header>
-      <h1>VVS pipe take-off</h1>
-      <label class="file">Open drawing<input id="file" type="file" accept="application/pdf" hidden /></label>
-      <span id="status">no drawing loaded</span>
+    <header class="bar">
+      <div class="brand">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="mark">
+          <path d="M2 8h6a4 4 0 0 1 4 4v0a4 4 0 0 0 4 4h6" />
+          <circle cx="12" cy="12" r="1.6" />
+        </svg>
+        <div>
+          <h1>VVS take-off</h1>
+          <p>Automatic pipe quantities from vector PDF drawings</p>
+        </div>
+      </div>
+      <div class="bar-actions">
+        <span id="engine-health" class="pill pill-quiet" hidden></span>
+        <label class="button" for="file">
+          <input id="file" type="file" accept="application/pdf" hidden />
+          Open drawing
+        </label>
+      </div>
     </header>
+
     <main>
-      <div><iframe id="viewer" title="marked drawing"></iframe></div>
-      <div>
-        <section><h2>Drawing</h2><div id="summary"></div></section>
-        <section><h2>Quantities</h2><div id="quantities"></div></section>
-        <section><h2>Verticals</h2><div id="verticals"></div></section>
-        <section><h2>Downloads</h2>
-          <a class="dl" id="dl-pdf" href="#">marked PDF</a>
-          <a class="dl" id="dl-csv" href="#">quantities CSV</a>
-          <a class="dl" id="dl-json" href="#">JSON report</a>
-        </section>
-        <section><h2>Progress</h2><pre id="progress"></pre></section>
+      <!-- Idle: the drop target is the whole first screen. -->
+      <section id="landing" class="landing">
+        <div id="dropzone" class="dropzone">
+          <svg viewBox="0 0 24 24" aria-hidden="true" class="drop-mark">
+            <path d="M12 16V4m0 0L8 8m4-4 4 4" />
+            <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+          </svg>
+          <p class="drop-title">Drop a drawing here</p>
+          <p class="drop-hint">Vector PDF. The engine reads the file's own geometry — nothing is typed in, and no expected answer is supplied.</p>
+        </div>
+        <ol class="steps">
+          <li><b>Geometry first.</b> Pipes are found from the drawing's linework, before any lettering is read.</li>
+          <li><b>Then the labels.</b> Text becomes a designation only when a pipe it points at accepts it.</li>
+          <li><b>Then the numbers.</b> Every metre is reconciled; a run that fails the check is published as broken, not quietly rounded off.</li>
+        </ol>
+      </section>
+
+      <!-- Working -->
+      <section id="working" class="working" hidden>
+        <div class="working-head">
+          <span class="spinner" aria-hidden="true"></span>
+          <div>
+            <p id="working-stage">Queued</p>
+            <p id="working-file" class="muted"></p>
+          </div>
+          <span id="working-elapsed" class="muted mono"></span>
+        </div>
+        <ol id="stage-list" class="stage-list"></ol>
+      </section>
+
+      <!-- Failed -->
+      <section id="failure" class="card failure" hidden>
+        <h2>The analysis did not finish</h2>
+        <pre id="failure-detail"></pre>
+      </section>
+
+      <!-- Results -->
+      <div id="results" class="results" hidden>
+        <div id="verdict" class="verdict"></div>
+
+        <div class="grid">
+          <div class="col-main">
+            <section class="card viewer-card">
+              <div class="card-head">
+                <h2>Marked drawing</h2>
+                <div class="downloads">
+                  <a id="dl-pdf" class="chip" href="#" download>PDF</a>
+                  <a id="dl-csv" class="chip" href="#" download>CSV</a>
+                  <a id="dl-json" class="chip" href="#" download>JSON</a>
+                </div>
+              </div>
+              <iframe id="viewer" title="marked drawing"></iframe>
+            </section>
+
+            <section class="card">
+              <div class="card-head">
+                <h2>Quantities</h2>
+                <span id="quantity-note" class="muted"></span>
+              </div>
+              <div class="scroll"><div id="quantities"></div></div>
+            </section>
+          </div>
+
+          <aside class="col-side">
+            <section class="card">
+              <div class="card-head"><h2>Scale</h2></div>
+              <div id="scale"></div>
+            </section>
+
+            <section class="card">
+              <div class="card-head"><h2>What was found</h2></div>
+              <div id="coverage"></div>
+            </section>
+
+            <section class="card">
+              <div class="card-head">
+                <h2>Text on the sheet</h2>
+              </div>
+              <p class="muted small">Spelling alone never makes a designation. These are the three tiers text can reach.</p>
+              <div id="tiers"></div>
+            </section>
+
+            <section class="card">
+              <div class="card-head"><h2>Confidence</h2></div>
+              <div id="confidence"></div>
+            </section>
+
+            <section class="card">
+              <div class="card-head"><h2>Verticals</h2></div>
+              <div class="scroll"><div id="verticals"></div></div>
+            </section>
+
+            <section class="card">
+              <div class="card-head"><h2>Provenance</h2></div>
+              <div id="provenance"></div>
+            </section>
+          </aside>
+        </div>
       </div>
     </main>
+
     <script type="module" src="./app.js"></script>
   </body>
 </html>

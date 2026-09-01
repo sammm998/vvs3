@@ -112,7 +112,7 @@ def infer_scale(
     """
     glyph_map = {g.glyph_id: g for g in glyphs}
     hypotheses: list[ScaleHypothesis] = []
-    hypotheses += ratio_note_hypotheses(text_items)
+    hypotheses += ratio_note_hypotheses(text_items, page_box)
     hypotheses += tolerant_ratio_hypotheses(text_items, glyph_map)
     hypotheses += dimension_hypotheses(text_items, objects, cap_height)
     for bar in _find_scale_bars(objects):

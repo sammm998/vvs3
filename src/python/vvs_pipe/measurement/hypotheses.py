@@ -79,24 +79,130 @@ def _ratio_to_mpp(denominator: float) -> float:
 # 1. The ratio note, read exactly
 
 
-def ratio_note_hypotheses(text_items: Sequence[TextItem]) -> list[ScaleHypothesis]:
+def ratio_note_hypotheses(
+    text_items: Sequence[TextItem], page_box: BBox | None = None
+) -> list[ScaleHypothesis]:
+    """Ratios stated in the sheet's own text, qualified by paper size.
+
+    A note commonly states more than one ratio because the same drawing is
+    issued at one sheet size and printed at another: "SKALA A1 (A3) 1:50
+    (1:100)" is one drawing at two scales, not a contradiction, and which ratio
+    applies depends on the size of the sheet in hand.  Where the note names
+    paper sizes alongside its ratios, they are paired in reading order and the
+    one matching this sheet's actual dimensions is the one that applies.
+
+    Paper sizes are matched against the ISO A series, which is a published
+    standard rather than anything about this drawing; a sheet that is not a
+    standard size, or a note whose sizes cannot be paired with its ratios,
+    simply leaves every ratio standing - and several standing ratios is a
+    conflict, which is the honest answer.
+    """
+    sheet = _iso_a_series(page_box) if page_box is not None else None
+    items = canonical_sort(list(text_items), key=lambda t: t.canonical_key())
     out: list[ScaleHypothesis] = []
-    for t in canonical_sort(list(text_items), key=lambda t: t.canonical_key()):
-        for m in _RATIO_RE.finditer(t.text):
-            den = float(m.group(1))
-            if not (MIN_RATIO <= den <= MAX_RATIO):
-                continue
+    for t in items:
+        ratios = [
+            float(m.group(1))
+            for m in _RATIO_RE.finditer(t.text)
+            if MIN_RATIO <= float(m.group(1)) <= MAX_RATIO
+        ]
+        if not ratios:
+            continue
+        chosen = _qualify_by_paper(t, items, ratios, sheet)
+        for den in chosen if chosen is not None else ratios:
             out.append(
                 ScaleHypothesis(
                     source="ratioNote",
                     metres_per_point=_ratio_to_mpp(den),
                     weight=0.9 * max(0.1, t.confidence),
                     ratio_denominator=den,
-                    evidence=(("textConfidence", qs(t.confidence)), ("denominator", den)),
-                    note=f"read {t.text!r}",
+                    evidence=(
+                        ("textConfidence", qs(t.confidence)),
+                        ("denominator", den),
+                        ("ratiosInNote", float(len(ratios))),
+                        ("paperQualified", 1.0 if chosen is not None else 0.0),
+                    ),
+                    note=(
+                        f"read {t.text!r}"
+                        if chosen is None
+                        else f"read {t.text!r}, {sheet} sheet selects 1:{den:g}"
+                    ),
                 )
             )
     return out
+
+
+# The ISO A series, derived rather than tabulated: A0 is one square metre with
+# sides in the ratio 1:sqrt(2), and each size after it is the previous one
+# halved across its long side.
+_PAPER_TOLERANCE = 0.02
+# A trailing word boundary would not survive an unresolved character - the mark
+# after the "A" is often exactly the one the classifier could not place - so the
+# token is bounded by explicit lookaround instead, and the placeholder set is
+# closed rather than "any non-word character", which would match a layer code.
+_PAPER_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])A([0-9\uFFFD?])(?![A-Za-z0-9])")
+
+
+def _iso_a_series(page_box: BBox) -> str | None:
+    long_mm = max(page_box.width, page_box.height) * 25.4 / 72.0
+    short_mm = min(page_box.width, page_box.height) * 25.4 / 72.0
+    for n in range(0, 8):
+        w = 1000.0 / (2 ** ((2 * n - 1) / 4))
+        h = 1000.0 / (2 ** ((2 * n + 1) / 4))
+        if (
+            abs(long_mm - w) <= _PAPER_TOLERANCE * w
+            and abs(short_mm - h) <= _PAPER_TOLERANCE * h
+        ):
+            return f"A{n}"
+    return None
+
+
+def _qualify_by_paper(
+    item: TextItem,
+    items: Sequence[TextItem],
+    ratios: Sequence[float],
+    sheet: str | None,
+) -> list[float] | None:
+    """Pick the one ratio this sheet's paper size selects, or nothing.
+
+    Returns ``None`` whenever the pairing is not unambiguous - a different
+    number of sizes than ratios, no size matching this sheet, more than one
+    matching - so that an unresolvable note leaves all its ratios standing
+    instead of being resolved by preference.
+    """
+    if sheet is None or len(ratios) < 2:
+        return None
+    text = item.text
+    for neighbour in _adjacent_lines(item, items):
+        text = f"{text} {neighbour.text}"
+    tokens = _PAPER_TOKEN_RE.findall(text)
+    if len(tokens) != len(ratios):
+        return None
+    matches = [i for i, tok in enumerate(tokens) if f"A{tok}" == sheet]
+    if len(matches) != 1:
+        return None
+    return [ratios[matches[0]]]
+
+
+def _adjacent_lines(item: TextItem, items: Sequence[TextItem]) -> list[TextItem]:
+    """Lines set directly above or below this one and overlapping it.
+
+    A scale note is routinely split across two lines, the sizes on one and the
+    ratios on the other, so the pairing has to be able to see both.
+    """
+    reach = max(item.height, 1.0) * 1.5
+    out: list[TextItem] = []
+    for other in items:
+        if other.text_id == item.text_id:
+            continue
+        gap = max(item.bbox.y0, other.bbox.y0) - min(item.bbox.y1, other.bbox.y1)
+        if gap > reach:
+            continue
+        overlap = min(item.bbox.x1, other.bbox.x1) - max(item.bbox.x0, other.bbox.x0)
+        if overlap <= 0:
+            continue
+        out.append(other)
+    return sorted(out, key=lambda t: (qs(t.bbox.y0), qs(t.bbox.x0)))
 
 
 # ---------------------------------------------------------------------------

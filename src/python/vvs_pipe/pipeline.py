@@ -25,7 +25,7 @@ from typing import Any, Sequence
 from .artwork import detect_artwork
 from .association import associate_designations
 from .canonical import canonical_json, canonical_sort, digest, ql, qs
-from .designations import detect_panels, discover_designations
+from .designations import detect_panels, discover_designations, promote_designations, tier_counts
 from .dimensions import resolve_diameter
 from .geometry.primitives import BBox, Segment
 from .glyph import segment_glyphs
@@ -45,7 +45,7 @@ from .model import (
 )
 from .pdf_forensics import ForensicReport, forensic_report
 from .pipes import dedupe_candidates, detect_pipes, reconstruct_dashes, single_line_candidates
-from .states import AnalysisStatus, IdentityState, Reason, ScaleState
+from .states import AnalysisStatus, DesignationTier, IdentityState, Reason, ScaleState
 from .text_reconstruction import reconstruct_text
 from .topology import build_graph, build_physical_pipes, build_runs
 from .topology.graph_build import PipeGraph
@@ -55,6 +55,16 @@ from .vector_extraction import ExtractionConfig, extract_document
 from .vertical import analyse_verticals
 
 SCHEMA = "vvs-pipe/analysis/1"
+
+
+def _mean(values) -> float | None:
+    """Mean of the values that exist, or nothing when none do.
+
+    Reporting 0.0 for "there was nothing to average" would read as "we are
+    certain of nothing", which is a different claim from "this does not apply".
+    """
+    present = [v for v in values if v is not None]
+    return qs(sum(present) / len(present)) if present else None
 
 
 @dataclass(slots=True)
@@ -106,6 +116,64 @@ class AnalysisResult:
             return AnalysisStatus.INCOMPLETE
         return AnalysisStatus.VALID
 
+    # --------------------------------------------------------------- metrics
+    def metrics(self) -> dict[str, Any]:
+        """What the run actually achieved, stated as coverage rather than as a score.
+
+        A single "accuracy" number would be a claim this engine has no way to
+        make: it does not know what is on the drawing, only what it found.  What
+        it can state honestly is how much of the geometry it placed, how much of
+        the lettering resolved, how many of its own predictions are still
+        ambiguous, and how confident each part of the chain is - each reported
+        separately, because a run can have excellent geometry and no scale, or a
+        perfect scale and unreadable labels, and averaging those into one figure
+        hides exactly the thing a reader needs to know.
+        """
+        glyphs = [g for p in self.pages for g in p.glyphs]
+        designations = [d for p in self.pages for d in p.designations]
+        pipes = [pp for p in self.pages for pp in p.physical_pipes]
+        runs = [r for p in self.pages for r in p.runs]
+
+        unresolved_glyphs = sum(1 for g in glyphs if g.character is None)
+        ambiguous = sum(1 for d in designations if d.state is IdentityState.AMBIGUOUS)
+        ambiguous += sum(1 for pp in pipes if pp.identity_state is IdentityState.AMBIGUOUS)
+        tiers = {t.value: 0 for t in DesignationTier}
+        for d in designations:
+            tiers[d.tier.value] += 1
+
+        named = [pp for pp in pipes if pp.designation]
+        measured = [pp for pp in pipes if pp.total_length_m is not None]
+        return {
+            "detectionCoverage": {
+                "vectorObjects": len(self.document.objects),
+                "pipeRuns": len(runs),
+                "physicalPipes": len(pipes),
+                "physicalPipesNamed": len(named),
+                "physicalPipesMeasured": len(measured),
+                "namedFraction": qs(len(named) / len(pipes)) if pipes else 0.0,
+                "measuredFraction": qs(len(measured) / len(pipes)) if pipes else 0.0,
+            },
+            "identity": {
+                "glyphs": len(glyphs),
+                "unresolvedGlyphs": unresolved_glyphs,
+                "glyphResolvedFraction": (
+                    qs((len(glyphs) - unresolved_glyphs) / len(glyphs)) if glyphs else 0.0
+                ),
+                "ambiguousEntities": ambiguous,
+            },
+            "designationTiers": tiers,
+            "confidence": {
+                "geometry": _mean(pp.confidence.geometry for pp in pipes),
+                "association": _mean(pp.confidence.association for pp in pipes),
+                "designation": _mean(d.confidence.overall for d in designations if d.tier
+                                     is DesignationTier.CONFIRMED_DESIGNATION),
+                "measurement": _mean(q.confidence.overall for q in self.quantities),
+            },
+            "scale": [p.scale.state.value for p in self.pages],
+            "reconciliationStatus": "OK" if self.reconciliation.ok else "FAILED",
+            "analysisStatus": self.status.value,
+        }
+
     # ---------------------------------------------------------------- output
     def to_canonical(self) -> dict[str, Any]:
         return {
@@ -130,6 +198,7 @@ class AnalysisResult:
             "verticals": [v.to_canonical() for p in self.pages for v in p.verticals],
             "scale": [p.scale.to_canonical() for p in self.pages],
             "quantities": [q.to_canonical() for q in self.quantities],
+            "metrics": self.metrics(),
             "diagnostics": {
                 "pages": [p.diagnostics for p in self.pages],
                 "reconciliation": self.reconciliation.to_canonical(),
@@ -352,6 +421,13 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
 
     pipes = build_physical_pipes(runs, resolved, page, mpp, verticals.by_run)
 
+    # Only now can text be told from a designation.  Everything above read the
+    # sheet; this reads back what the geometry accepted, and nothing that no
+    # pipe accepted is published as a designation.
+    designations = promote_designations(
+        discovery.designations, association.designation_to_runs, pipes, association.assignments
+    )
+
     diagnostics = {
         "page": page,
         "textCapHeightPt": qs(cap),
@@ -373,6 +449,7 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
         "artworkRegions": [r.to_canonical() for r in artwork_regions],
         "artworkObjectsExcluded": len(artwork_ids),
         "dashReconstruction": dash_diagnostics,
+        "designationTiers": tier_counts(designations),
         "duplicateCandidatesMerged": duplicate_candidates,
         "concentricCandidatesMerged": concentric_candidates,
     }
@@ -383,7 +460,7 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
         text_cap_height=cap,
         glyphs=text.glyphs,
         text_items=text.items,
-        designations=discovery.designations,
+        designations=designations,
         candidates=candidates,
         graph=graph,
         runs=runs,
