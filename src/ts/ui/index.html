@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VVS pipe take-off</title>
+    <style>
+      :root { color-scheme: light dark; --line: #8884; }
+      * { box-sizing: border-box; }
+      body { margin: 0; font: 13px/1.5 ui-sans-serif, system-ui, sans-serif; }
+      header { display: flex; gap: 1rem; align-items: center; padding: .75rem 1rem; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+      h1 { font-size: 15px; margin: 0; font-weight: 650; }
+      main { display: grid; grid-template-columns: minmax(340px, 1fr) minmax(360px, 480px); gap: 1rem; padding: 1rem; align-items: start; }
+      @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+      iframe { width: 100%; height: 72vh; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+      section { border: 1px solid var(--line); border-radius: 6px; padding: .75rem; margin-bottom: 1rem; }
+      section > h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; margin: 0 0 .5rem; opacity: .7; }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      th, td { text-align: left; padding: .25rem .4rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { font-weight: 600; opacity: .75; }
+      .kv { display: flex; justify-content: space-between; gap: 1rem; padding: .1rem 0; }
+      .kv span { opacity: .7; }
+      pre { margin: 0; font-size: 11px; max-height: 8rem; overflow: auto; opacity: .8; }
+      button, label.file { border: 1px solid var(--line); border-radius: 5px; padding: .3rem .6rem; background: transparent; cursor: pointer; font: inherit; }
+      .toggles { display: flex; gap: .8rem; flex-wrap: wrap; font-size: 12px; }
+      a.dl { margin-right: .6rem; }
+      #measurable { font-size: 12px; opacity: .8; margin-bottom: .5rem; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>VVS pipe take-off</h1>
+      <label class="file">Open drawing<input id="file" type="file" accept="application/pdf" hidden /></label>
+      <button id="view-marked" type="button">Marked</button>
+      <button id="view-debug" type="button">Debug</button>
+      <button id="view-original" type="button">Original</button>
+      <span id="status">no drawing loaded</span>
+    </header>
+    <main>
+      <div>
+        <iframe id="viewer" title="drawing"></iframe>
+        <section>
+          <h2>Layers</h2>
+          <div class="toggles">
+            <label><input id="layer-designations" type="checkbox" /> designations</label>
+            <label><input id="layer-physicalPipes" type="checkbox" /> physical pipes</label>
+            <label><input id="layer-verticals" type="checkbox" /> verticals</label>
+            <label><input id="layer-unresolved" type="checkbox" /> unresolved</label>
+            <label><input id="layer-legend" type="checkbox" /> legend entries</label>
+            <label><input id="layer-glyphs" type="checkbox" /> glyphs</label>
+          </div>
+        </section>
+      </div>
+      <div>
+        <section><h2>Drawing</h2><div id="summary"></div></section>
+        <section>
+          <h2>Quantities</h2>
+          <div id="measurable"></div>
+          <div id="quantities"></div>
+        </section>
+        <section><h2>Totals per designation</h2><div id="totals"></div></section>
+        <section><h2>Designations</h2><div id="designations"></div></section>
+        <section><h2>Physical pipes</h2><div id="pipes"></div></section>
+        <section><h2>Verticals</h2><div id="verticals"></div></section>
+        <section>
+          <h2>Downloads</h2>
+          <a class="dl" id="download-pdf" href="#">marked PDF</a>
+          <a class="dl" id="download-csv" href="#">quantities CSV</a>
+          <a class="dl" id="download-json" href="#">JSON report</a>
+        </section>
+        <section><h2>Progress</h2><pre id="progress"></pre></section>
+      </div>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
