@@ -18,6 +18,16 @@ drawing says, by exploiting a property of the drawing itself:
    whichever fits it better and the other cluster falls to its next best
    character.
 
+Exclusivity is a statement about the drawing's *alphabet*, not a bijection over
+every shape on the sheet.  A real drawing splits into far more clusters than
+there are characters - 872 against an alphabet of 49 on the reference sheet,
+because the same letter appears at several sizes, weights and rotations - and
+forcing a global one-to-one match there starves the alphabet: 827 of those
+clusters, including a 205-instance ``R``, were left with no character at all.
+So the exclusive match runs over the clusters carrying the most evidence, which
+are the ones that realise the alphabet, and every remaining cluster then takes
+its own best character with duplicates allowed.
+
 A cluster whose best cost exceeds ``REJECT_COST`` is left unassigned and its
 glyphs are reported UNRESOLVED_GLYPH rather than forced onto a character.
 """
@@ -134,6 +144,23 @@ def cluster_glyphs(observations: Sequence[GlyphObservation]) -> list[list[int]]:
     return connected_components(n, edges)
 
 
+def _assign(
+    character_of: dict[int, str | None],
+    confidence_of: dict[int, float],
+    cluster: int,
+    ch: str,
+    row: dict[str, float],
+) -> None:
+    """Record a cluster's character and how confident that decision is."""
+    assigned_cost = row.get(ch, REJECT_COST)
+    others = [d for c, d in sorted(row.items(), key=lambda kv: (kv[1], kv[0])) if c != ch]
+    runner_up = others[0] if others else REJECT_COST
+    margin = max(0.0, runner_up - assigned_cost)
+    fit = max(0.0, 1.0 - assigned_cost / REJECT_COST)
+    character_of[cluster] = ch
+    confidence_of[cluster] = qs(min(1.0, 0.55 * fit + 0.45 * min(1.0, margin / 0.35)))
+
+
 def resolve_alphabet(
     observations: Sequence[GlyphObservation],
     singletons: Sequence[GlyphObservation] = (),
@@ -173,55 +200,68 @@ def resolve_alphabet(
         per_cluster.append(glyph_distance_vector(rep.raster, rel_h, rel_b))
 
     chars = sorted({ch for row in per_cluster for ch in row})
-    n_clusters = len(per_cluster)
     n_chars = len(chars)
-    # Real characters, then one reject column per cluster so that a cluster is
-    # allowed to stay unassigned instead of being forced onto a character.
-    cost = np.full((n_clusters, n_chars + n_clusters), REJECT_COST, dtype=np.float64)
-    for i, row in enumerate(per_cluster):
-        for j, ch in enumerate(chars):
-            cost[i, j] = row.get(ch, REJECT_COST)
+    n_clusters = len(per_cluster)
 
-    # Exact ties are common here and the solver would otherwise break them
-    # arbitrarily.  "Give 1 to the cluster of 369 glyphs and I to the cluster
-    # of one" and its reverse can score exactly the same total, and picking
-    # either at random is the arbitrary tie-break this engine forbids - with
-    # 369 characters riding on it.
-    #
-    # So what is minimised is *regret* - how much worse than its own best match
-    # a cluster is forced to accept - with each cluster's regret amplified by
-    # how much evidence stands behind it.  A tie is then always resolved in
-    # favour of the better-supported cluster, and the amplification is far too
-    # small to overturn a decision the shape evidence actually settles.
-    sizes = np.array([len(members) for members in comps], dtype=np.float64)
-    span = math.log1p(float(sizes.max())) if sizes.size else 1.0
-    weight = (np.log1p(sizes) / span) if span > 0 else np.zeros_like(sizes)
-    best_per_cluster = cost[:, :n_chars].min(axis=1) if n_chars else np.zeros(n_clusters)
-    regret = cost - best_per_cluster[:, None]
-    scaled = best_per_cluster[:, None] + regret * (1.0 + REGRET_EVIDENCE_GAIN * weight[:, None])
-    rows, cols = linear_sum_assignment(scaled)
+    # The clusters that realise the alphabet are the ones with the most
+    # evidence behind them; they compete exclusively.  The rest are variants of
+    # the same characters at other sizes, and take their best match directly.
+    order = sorted(range(n_clusters), key=lambda i: (-len(comps[i]), i))
+    competing = sorted(order[:n_chars])
+    competing_pos = {ci: k for k, ci in enumerate(competing)}
 
     character_of: dict[int, str | None] = {}
     confidence_of: dict[int, float] = {}
     ranked_of: dict[int, tuple[tuple[str, float], ...]] = {}
     sizes: dict[int, int] = {i: len(comps[i]) for i in range(n_clusters)}
-    for i, j in zip(rows.tolist(), cols.tolist()):
-        row = per_cluster[i]
-        ranked = sorted(row.items(), key=lambda kv: (kv[1], kv[0]))
-        ranked_of[i] = tuple((c, qs(d)) for c, d in ranked[:6])
-        if j >= n_chars or cost[i, j] >= REJECT_COST:
-            character_of[i] = None
-            confidence_of[i] = 0.0
+
+    for i in range(n_clusters):
+        ranked_of[i] = tuple(
+            (c, qs(d)) for c, d in sorted(per_cluster[i].items(), key=lambda kv: (kv[1], kv[0]))[:6]
+        )
+
+    if competing:
+        cost = np.full((len(competing), n_chars + len(competing)), REJECT_COST, dtype=np.float64)
+        for k, ci in enumerate(competing):
+            for j, ch in enumerate(chars):
+                cost[k, j] = per_cluster[ci].get(ch, REJECT_COST)
+
+        # Exact ties are common here and the solver would otherwise break them
+        # arbitrarily.  "Give 1 to the cluster of 369 glyphs and I to the
+        # cluster of one" and its reverse can score exactly the same total, and
+        # picking either at random is the arbitrary tie-break this engine
+        # forbids - with 369 characters riding on it.
+        #
+        # So what is minimised is *regret* - how much worse than its own best
+        # match a cluster is forced to accept - with each cluster's regret
+        # amplified by how much evidence stands behind it.
+        sizes_arr = np.array([len(comps[ci]) for ci in competing], dtype=np.float64)
+        span = math.log1p(float(sizes_arr.max())) if sizes_arr.size else 1.0
+        weight = (np.log1p(sizes_arr) / span) if span > 0 else np.zeros_like(sizes_arr)
+        best_cost = cost[:, :n_chars].min(axis=1) if n_chars else np.zeros(len(competing))
+        regret = cost - best_cost[:, None]
+        scaled = best_cost[:, None] + regret * (1.0 + REGRET_EVIDENCE_GAIN * weight[:, None])
+        rows, cols = linear_sum_assignment(scaled)
+        for k, j in zip(rows.tolist(), cols.tolist()):
+            ci = competing[k]
+            row = per_cluster[ci]
+            if j >= n_chars or cost[k, j] >= REJECT_COST:
+                character_of[ci] = None
+                confidence_of[ci] = 0.0
+                continue
+            ch = chars[j]
+            _assign(character_of, confidence_of, ci, ch, row)
+
+    for ci in range(n_clusters):
+        if ci in competing_pos:
             continue
-        ch = chars[j]
-        assigned_cost = row.get(ch, REJECT_COST)
-        # Margin against the best *other* character for this cluster.
-        others = [d for c, d in ranked if c != ch]
-        runner_up = others[0] if others else REJECT_COST
-        margin = max(0.0, runner_up - assigned_cost)
-        fit = max(0.0, 1.0 - assigned_cost / REJECT_COST)
-        character_of[i] = ch
-        confidence_of[i] = qs(min(1.0, 0.55 * fit + 0.45 * min(1.0, margin / 0.35)))
+        row = per_cluster[ci]
+        ranked = sorted(row.items(), key=lambda kv: (kv[1], kv[0]))
+        if not ranked or ranked[0][1] >= REJECT_COST:
+            character_of[ci] = None
+            confidence_of[ci] = 0.0
+            continue
+        _assign(character_of, confidence_of, ci, ranked[0][0], row)
 
     # Lone marks: adopt the character of the cluster whose shape they match.
     next_cluster = n_clusters
