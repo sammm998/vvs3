@@ -207,16 +207,13 @@ def associate_designations(
                 if size_conflict
                 else 0.55 * inline_score + 0.15 * orient_score + 0.30 * size_score
             )
-            scored_callout.append((callout, ri, tuple(evidence)))
-            scored_inline.append((inline, ri, tuple(evidence)))
-            score = callout  # replaced below once the label's leaders are known
             if leader_score >= LEADER_SUFFICIENT_SCORE:
                 # A leader that lands on the pipe is direct evidence; it stands
                 # on its own even when the corroborating signals are silent.
-                score = max(score, MIN_DIRECT_SCORE + 0.5 * leader_score)
-                scored_callout[-1] = (score, ri, tuple(evidence))
-            if leader_score > 0.0:
-                leader_landed = True
+                callout = max(callout, MIN_DIRECT_SCORE + 0.5 * leader_score)
+            leader_landed = leader_landed or leader_score > 0.0
+            scored_callout.append((callout, ri, tuple(evidence)))
+            scored_inline.append((inline, ri, tuple(evidence)))
 
         # A drawn leader is the drawing saying which pipe it means.  Once one
         # has landed, a neighbouring pipe that the label happens to lie near is

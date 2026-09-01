@@ -5,9 +5,11 @@ to exactly one row, so the reconciliation invariant - every metre of detected
 centerline appears once and only once - is preserved by construction and
 re-checked in :mod:`vvs_pipe.validation.reconcile`.
 
-Pipes whose identity is not settled are not silently folded into a neighbouring
-row: they get their own rows carrying the state and the reason, so an
-UNRESOLVED length is visible in the take-off rather than absent from it.
+Pipes whose identity is not settled are not silently folded away: a row carries
+the worst state among its members together with every reason, so an UNRESOLVED
+length is visible in the take-off rather than absent from it - and a row that
+mixes a settled pipe with an unsettled one reads as unsettled, which is the
+honest summary.
 """
 
 from __future__ import annotations
@@ -29,11 +31,21 @@ def aggregate_quantities(pipes: Sequence[PhysicalPipe]) -> tuple[QuantityRow, ..
         # a real sheet it turned a single S3-R8-75 into three rows at 61.4, 63.5
         # and 75 mm.  Any disagreement between the two is still reported, per
         # pipe, by the dimension stage - it just does not fragment the take-off.
-        size = p.nominal_diameter_mm if p.nominal_diameter_mm is not None else p.diameter_mm
+        # Grouped by the size the *label* states.  Where it states none, the
+        # designation alone is the group: splitting it by the width each run
+        # happened to measure would publish several different sizes for a label
+        # that gives one - on the real sheet a single bare S3-R8 became seven
+        # rows at 61, 63, 154, 161, 163 and 648 mm, none of which the drawing
+        # says anywhere.
+        # Identity state is *not* part of the key.  The same designation at the
+        # same size is one quantity line however settled each contributing pipe
+        # happens to be, and the line already carries the worst state of its
+        # members and their reasons - which is what makes an unresolved length
+        # visible.  Splitting on it published the same designation and size
+        # twice, which reads as two different pipes.
         key = (
             p.designation or "",
-            ql(size) if size is not None else -1.0,
-            p.identity_state.value,
+            ql(p.nominal_diameter_mm) if p.nominal_diameter_mm is not None else -1.0,
         )
         groups.setdefault(key, []).append(p)
 
@@ -99,4 +111,7 @@ def _row_diameter(members: Sequence[PhysicalPipe]) -> tuple[float | None, bool]:
         return resolved[0], False
     if not resolved:
         return nominal, False
-    return (nominal if nominal is not None else resolved[0]), True
+    # The members disagree.  With a stated size there is something to fall back
+    # on; without one the size is simply not established, and saying so is
+    # better than picking whichever width sorted first.
+    return nominal, True

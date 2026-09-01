@@ -56,6 +56,19 @@ def promote_designations(
             pipes_by_run.setdefault(rid, []).append(p)
     assignments = assignments or {}
 
+    # How often each token structure recurs among the sheet's own candidates.
+    # A real designation belongs to a family - a drawing that has S3-R8-75 has
+    # S3-R8-110 and S1-P2-75 written the same way - while a note or a date
+    # matches nothing else.  This is recorded as evidence and deliberately not
+    # used as a gate: where the cut would have to fall to separate them on one
+    # sheet is a fact about that sheet, and a drawing carrying a single system
+    # would fail any such test.  A reviewer can see it; the engine does not act
+    # on it.
+    pattern_counts: dict[str, int] = {}
+    for d in designations:
+        if d.role is TextRole.PIPE_DESIGNATION and not d.is_legend:
+            pattern_counts[d.structure.pattern] = pattern_counts.get(d.structure.pattern, 0) + 1
+
     out: list[Designation] = []
     for d in canonical_sort(list(designations), key=lambda x: x.canonical_key()):
         run_ids = list(designation_to_runs.get(d.designation_id, ()))
@@ -75,6 +88,7 @@ def promote_designations(
             ("physicalPipesReached", float(len(reached))),
             ("pipeLengthPt", qs(length)),
             ("pointsAtItsPipe", 1.0 if pointed else 0.0),
+            ("sharesItsStructureWith", float(pattern_counts.get(d.structure.pattern, 0) - 1)),
         )
 
         if candidate and reached and pointed and length >= MIN_PROMOTED_LENGTH_PT:

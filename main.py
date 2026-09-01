@@ -382,6 +382,12 @@ def main() -> int:
     # the outside to a routing problem; staying up and saying what is wrong
     # keeps the two distinguishable.
     global ENGINE_ERROR
+    if not WORKER.exists():
+        # Reported here rather than discovered when the first upload tries to
+        # spawn it, which would look like an analysis failure instead of a
+        # packaging one.
+        ENGINE_ERROR = f"worker script missing at {WORKER}"
+        sys.stderr.write(f"ERROR: {ENGINE_ERROR}\n")
     try:
         import vvs_pipe  # noqa: F401
     except Exception as err:  # pragma: no cover - deployment diagnostics

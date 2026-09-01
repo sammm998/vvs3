@@ -168,9 +168,10 @@ Same sheet, same blind run, after the corrections above.
 | `ANALYSIS_STATUS` | (none) | **VALID** |
 | reconciliation | FAILED — 24 shared centerlines, 66 runs in two pipes | **OK** |
 | scale | `SCALE_UNKNOWN` | **RESOLVED, 1:50** |
-| designations reported | 1 491 (= every text item) | 19 confirmed, 123 candidates, 1 333 text-only |
+| designations reported | 1 491 (= every text item) | 28 confirmed, 114 candidates, 1 333 text-only |
 | pipe runs | 802 | 405 |
-| physical pipes measured | 0 | 215 of 215 |
+| physical pipes measured | 0 | 225 of 225 |
+| physical pipes named | 0 | 42 |
 | lettering | `S3-98-75` | `S3-R8-75` |
 
 ## What each fix actually was
@@ -211,45 +212,89 @@ does the work is connectivity: wall strokes never join end to end
 ## Blind run against the facit
 
 Run blind, then compared - never the other way round.  The facit is the manual
-Bluebeam take-off of the same sheet.
+Bluebeam take-off of the same sheet, nine rows.
 
-```
-truePositives 4   falsePositives 6   falseNegatives 5
-precision 0.40    recall 0.44        f1 0.42
-```
+Exact matches on designation *and* nominal size: `S1-P2-75`, `S3-P2-160`,
+`S3-R8-75`, `S3-R8-110`, `S3-R8-160`.
 
-Exact matches on designation *and* nominal size: `S1-P2-75`, `S3-R8-75`,
-`S3-R8-110`, `S3-R8-160`.
-
-Missed entirely: `KV1-X31-16`, `KV2-X31-16`, `VV1-X31-16`, `S1-P2-110`,
-`S3-P2-160`.
-
-Reported but not in the facit: `ENL. PM-2`, one string with unresolved
-characters, and four partial readings - `S1-P2` and `S3-R8` without their size
-suffix, which are the same labels found twice with the stacked size line
-missed.
+Missed: `KV1-X31-16`, `KV2-X31-16`, `VV1-X31-16` - all three misread at the
+character level, `K` as `X` and `V` as `Y` - and `S1-P2-110`, which is read
+correctly four times but never associates.
 
 **The most useful number in the whole comparison is a length.**  For system
-S3-R8 the engine reports 26.1 m at DN 110 and 54.7 m at DN 75; the facit says
+S3-R8 the engine reports 30.1 m at DN 110 and 49.8 m at DN 75; the facit says
 59.8 m and 21.3 m.  Individually both are badly wrong.  Together they are
-80.8 m against 81.1 m - **0.3 m, or 0.4 %, apart**.
+79.9 m against 81.1 m - **1.2 m, or 1.5 %, apart**.
 
 The geometry is right and the measurement is right.  What is wrong is which
 size each run was attributed to: the two are very nearly swapped.  That places
 the remaining error squarely in designation-to-run association, not in
-detection, not in the scale, and not in measurement - which is a much smaller
-and much better-defined problem than the one this rebuild started from.
+detection, not in the scale, and not in measurement.
+
+### The association work made recall better and precision worse
+
+Stated plainly, because it is the one place where a change traded one thing for
+another rather than simply fixing a defect:
+
+| | before the association work | after |
+| --- | --- | --- |
+| exact matches | 4 | **5** |
+| missed | 5 | **4** |
+| reported and not in the facit | 6 | 10 |
+| recall | 0.44 | **0.56** |
+| precision | **0.40** | 0.33 |
+| F1 | 0.42 | 0.42 |
+
+The starting precision was high partly by abstention: the engine associated
+almost nothing (17 named pipes of 215), so it was rarely wrong because it
+rarely spoke.  An inline label - written on the pipe, no leader - could never
+associate at all, which is how most of a real sheet is labelled, and that was a
+defect rather than caution.  Fixing it named 42 pipes and found one more of the
+facit's rows.
+
+F1 lands where it started, at 0.42, with one more of the facit's rows found and
+a quantity list that is now one row per designation and size rather than one
+per measured width.
+
+The false positives it costs are mostly not inventions.  They are *partial
+readings of real systems*: `S3-R8` without its size line, `S1-P2` without its
+size line.  The facit compares on (designation, size) pairs, so a partial
+reading is scored exactly as harshly as a fabricated one.  The genuinely wrong
+entries are four: two "ENL. PM" notes, a date, and one string of unresolved
+characters.
 
 ## What is still wrong
 
-* **Association is weak.**  Only 17 of 215 physical pipes carry a designation.
-  The geometry is found and measured; most of it is reported unnamed.  That is
-  the honest state - an unnamed pipe is a real pipe with no evidence tying it
-  to a label - but it is the largest remaining gap between this and a manual
+* **Association still names only a fifth of the pipes** - 42 of 225.  The
+  geometry is found and measured; most of it is reported unnamed.  That is the
+  honest state, and it is the largest remaining gap between this and a manual
   take-off.
-* **Two false confirmations remain**: `ENL. PM-2` and one string containing
-  unresolved characters.  Both have a leader that lands on a pipe, so the
-  present evidence model cannot tell them from a designation.
+* **A label's size line often fails to resolve.**  Thirty-four instances of
+  `S3-R8` on the sheet have their size written on a second line directly below,
+  and that line reconstructs as a single unresolved glyph 9.96 x 9.12 pt - two
+  digits assembled as one character.  Character assembly uses a single
+  sheet-wide cap height, so lettering at any other size is mis-segmented, and
+  this size line is 1.4 caps tall.  Fixing that would turn a whole class of
+  partial readings into complete ones.
+* **K/X and V/Y are confused**, which is what loses `KV1-X31-16`,
+  `KV2-X31-16` and `VV1-X31-16`.  The drawing's own font would settle it, but
+  the embedded ISOCPEUR subset maps only `-.0124579ABELMNP`: the lettering was
+  exported as outlines, so the characters that appear only in the lettering
+  were never added to the subset.  The glyph program may still hold them, but
+  with no cmap entry there is no way to know which glyph index is which
+  character, and guessing is not available to this engine.  Those characters
+  fall back to base-14 shapes.
+* **Two labels on one line are read as one text item** - `VV1-X31 XY2-X31` -
+  costing three more entries.
+* **Four genuinely wrong confirmations remain**: two "ENL. PM" notes, a date,
+  and one unresolved string.  Each has a leader that lands on a pipe, so the
+  present evidence model cannot separate them from a designation.  A structural
+  signal does separate them cleanly on this sheet - a real designation's token
+  pattern recurs 32 to 38 times while a note's recurs twice - and it is
+  recorded as evidence (`sharesItsStructureWith`), but it is deliberately *not*
+  used as a gate: where the cut would have to fall to separate them here is a
+  fact about this sheet, and a drawing carrying a single system would fail any
+  such test.
 * **386 of 4 789 glyphs are unresolved** (8 %), and some resolved characters
   are still wrong.
 * **The role classifier's WALL and TEXT signatures are unreliable** on this

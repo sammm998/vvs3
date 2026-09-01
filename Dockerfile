@@ -23,7 +23,11 @@ RUN apt-get update \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py ./
+# main.py serves; worker.py is the child process it spawns for each analysis.
+# Both are required - without the worker every upload fails at the moment the
+# service tries to start it, which is exactly the failure this split was added
+# to make impossible.
+COPY main.py worker.py ./
 COPY src ./src
 COPY web ./web
 
@@ -33,6 +37,8 @@ EXPOSE 8080
 
 # A container that cannot import the engine must fail here, not on the first
 # upload half an hour later.
-RUN python -c "import sys; sys.path.insert(0,'src/python'); import vvs_pipe, fitz, numpy, scipy, shapely, cv2; print('engine ok')"
+RUN python -c "import sys; sys.path.insert(0,'src/python'); import vvs_pipe, fitz, numpy, scipy, shapely, cv2; print('engine ok')" \
+    && test -f worker.py && test -f web/index.html && test -f web/app.js && test -f web/app.css \
+    && echo "service files ok"
 
 CMD ["python", "main.py"]
