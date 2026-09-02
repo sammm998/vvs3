@@ -378,6 +378,15 @@ def _record(store: dict[str, RunAssignment], run_id: str, value: RunAssignment) 
         store[run_id] = value
         return
     if existing.designation and value.designation and existing.designation != value.designation:
+        fuller = _more_complete(existing.designation, value.designation)
+        if fuller is not None:
+            # Not a contradiction: the same code, once with the size line under
+            # it read and once without.  A drawing that writes "S3-R8" over
+            # "110" says one thing, and treating the two readings as rival
+            # claims left the pipe unnamed - on the production sheet that was
+            # 13 of 33 attached runs.
+            store[run_id] = existing if fuller == existing.designation else value
+            return
         store[run_id] = RunAssignment(
             designation=None,
             designation_ids=tuple(sorted(set(existing.designation_ids + value.designation_ids))),
@@ -390,6 +399,23 @@ def _record(store: dict[str, RunAssignment], run_id: str, value: RunAssignment) 
         return
     if value.association_confidence > existing.association_confidence:
         store[run_id] = value
+
+
+def _more_complete(a: str, b: str) -> str | None:
+    """Return the fuller of two readings when one extends the other.
+
+    ``S3-R8`` and ``S3-R8-110`` are the same designation with and without its
+    size; ``S3-R8-110`` and ``S3-P2-160`` are two different pipes.  Only the
+    first pair may be resolved, and only in favour of the reading that carries
+    more of what the drawing wrote.
+    """
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    if short == long:
+        return long
+    if not long.startswith(short):
+        return None
+    tail = long[len(short):]
+    return long if tail and tail[0] in "-/" and tail[1:].replace(".", "").isdigit() else None
 
 
 def _width_compatible(a: PipeRun, b: PipeRun) -> bool:

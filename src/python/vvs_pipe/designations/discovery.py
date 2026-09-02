@@ -256,7 +256,12 @@ def discover_designations(
             if any(point_segment_distance(t.bbox.center, s) <= near_r for s in o.segments()):
                 near_geometry += 1
 
-        code_like = _code_like(parts)
+        # A reading that still contains an unresolved character is not a
+        # designation, whatever its shape: publishing "L?.??S?8" as a pipe name
+        # asserts something nobody wrote, and it competes with the correct
+        # reading of the same pipe.
+        unresolved_text = "\ufffd" in text
+        code_like = _code_like(parts) and not unresolved_text
         letters_only = all(p[0] == "L" or not p[1].strip() for p in parts)
         digits_only = all(p[0] == "D" or not p[1].strip() for p in parts)
         explicit_d = _EXPLICIT_DIAMETER_RE.match(text.replace(" ", ""))

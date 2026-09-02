@@ -24,14 +24,17 @@ from typing import Any, Sequence
 
 from .artwork import detect_artwork
 from .association import associate_designations
+from .geometry.index import SpatialIndex
 from .association.attachment import (attach_leaders, attested_pipe_layers,
-                                     discover_pipe_layers, source_objects_of_run)
+                                     attested_pipe_pens, discover_pipe_layers,
+                                     source_objects_of_run)
 
 # How much of a physical pipe must stand on a layer the drawing's own leaders
 # point at before it is counted as pipework rather than reported as linework.
 MIN_ATTESTED_PIPE_SHARE = 0.5
 from .association.associate import ChainFailure
-from .association.leaders import leaders_by_text_item, lettering_pen, trace_leaders
+from .association.leaders import (label_blocks, leaders_by_text_item, lettering_pen,
+                                  trace_leaders)
 from .canonical import canonical_json, canonical_sort, digest, ql, qs
 from .designations import detect_panels, discover_designations, promote_designations, tier_counts
 from .dimensions import resolve_diameter
@@ -376,6 +379,7 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
     traced_by_text = leaders_by_text_item(traced)
     leader_object_ids = frozenset(oid for l in traced for oid in l.object_ids)
 
+
     detection = detect_pipes(
         objects,
         box,
@@ -504,7 +508,31 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
     attested = attested_pipe_layers(attachments, fallback=pipe_layers)
     layer_of_object = {oid: o.layer for oid, o in objects_by_id.items()}
 
+    # The weight the drawing draws its pipes with, taken from the runs its own
+    # leaders land on.  A layer is not enough on its own: the sheet's pipe layer
+    # also carries hatch, and the layer the leaders live on carries lettering.
+    def _pen_of_run(rid: str) -> float | None:
+        pens = [
+            candidates_by_id[cid].stroke_width
+            for cid in candidate_ids_of_run.get(rid, ())
+            if cid in candidates_by_id and candidates_by_id[cid].stroke_width
+        ]
+        if not pens:
+            return None
+        pens.sort()
+        return pens[len(pens) // 2]
+
+    pen_of_run = {r.pipe_run_id: _pen_of_run(r.pipe_run_id) for r in runs}
+    # The weight the sheet letters with is not a pipe weight, whatever a leader
+    # happens to land on.  Two stacked labels put their rules a constant
+    # distance apart, and the pairer reads that as a bore; excluding the
+    # lettering pen is what stops a column of labels becoming a pipe.
+    pipe_pens = attested_pipe_pens(
+        attachments, pen_of_run, excluded_pens=(lettering_pen(objects, text.consumed_object_ids),)
+    )
+
     runs_by_id = {r.pipe_run_id: r for r in runs}
+    attached_run_ids = {a.run_id for a in attachments}
 
     def _attested_share(pipe) -> tuple[float, str | None]:
         """How much of a pipe's length stands on a layer the drawing points at.
@@ -524,7 +552,16 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
             total += length
             layers = {layer_of_object.get(oid) for oid in run_source_objects.get(rid, ())}
             here = sorted(x for x in layers if x and x in attested.names)
-            if here:
+            # A single unpaired stroke is the weakest thing the detector
+            # accepts, and on a real sheet most of them are annotation - the
+            # leaders themselves.  One is pipework only if a verified leader
+            # landed on it; otherwise nothing on the drawing says it is a pipe.
+            if run.style == "single_line" and rid not in attached_run_ids:
+                continue
+            # Both must hold: the right layer drawn with the wrong pen is the
+            # hatch on the pipe layer, and the right pen on the wrong layer is
+            # somebody else's service.
+            if here and pipe_pens.accepts(pen_of_run.get(rid)):
                 attested_length += length
                 best = best or here[0]
         return (attested_length / total if total > 0.0 else 0.0), best
@@ -588,6 +625,8 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
             "physicalPipesDesignated": len([p for p in pipes if p.designation]),
             "physicalPipes": len(pipes),
             "pipeLayers": pipe_layers.to_canonical(),
+            "attestedPipeLayers": attested.to_canonical(),
+            "attestedPipePens": pipe_pens.to_canonical(),
             "attachmentFailures": [f.to_canonical() for f in attachment_failures],
             "chainFailures": [f.to_canonical() for f in chain_failures],
             "proximityHintsNotUsed": [

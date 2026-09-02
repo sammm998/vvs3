@@ -131,6 +131,67 @@ class AttachmentFailure:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PipePens:
+    """The pen weights the drawing draws its pipes with."""
+
+    widths: tuple[float, ...]
+    shares: tuple[tuple[float, float], ...]
+    active: bool
+
+    def accepts(self, width: float | None, tolerance: float = 0.15) -> bool:
+        if not self.active:
+            return True
+        if width is None:
+            return False
+        return any(abs(width - w) <= tolerance * max(w, 1e-6) for w in self.widths)
+
+    def to_canonical(self) -> dict:
+        return {"active": self.active, "widths": [qs(w) for w in self.widths],
+                "shares": [[qs(w), qs(share)] for w, share in self.shares]}
+
+
+def attested_pipe_pens(
+    attachments: Sequence[FeAttachment],
+    pen_of_run: Mapping[str, float | None],
+    min_share: float = 0.10,
+    excluded_pens: Sequence[float] = (),
+) -> PipePens:
+    """The pen weights the drawing points its leaders at.
+
+    A plan sheet draws its services heavy and its background light, and it says
+    which is which by pointing a labelled leader at one of them.  Without this,
+    a hatch boundary on a pipe layer, or the annotation strokes on the layer the
+    leaders themselves live on, are counted as pipe: on the production sheet
+    that was 9 921 pt of 0.36 pt hatch and 6 975 pt of 0.48-0.72 pt lettering
+    lines, against pipes drawn at 1.44 and 2.04.
+
+    Like the layers, the weights are taken from the drawing rather than named:
+    a sheet drawn at any other weight moves them with it.
+    """
+    weight: dict[float, float] = {}
+    for a in attachments:
+        if a.run_style not in ("double_line", "dashed_line"):
+            continue          # a bare stroke says nothing about the pipe pen
+        pen = pen_of_run.get(a.run_id)
+        if pen is None or pen <= 0.0:
+            continue
+        if any(abs(pen - x) <= 0.01 for x in excluded_pens if x):
+            continue          # the weight this sheet letters with
+        key = qc(pen)
+        weight[key] = weight.get(key, 0.0) + 1.0
+    if not weight:
+        return PipePens((), (), active=False)
+    total = sum(weight.values())
+    shares = sorted(((w, n / total) for w, n in weight.items()), key=lambda kv: (-kv[1], kv[0]))
+    widths = tuple(w for w, share in shares if share >= min_share)
+    if not widths:
+        return PipePens((), (), active=False)
+    return PipePens(widths=widths,
+                    shares=tuple((qs(w), qs(share)) for w, share in shares),
+                    active=True)
+
+
 def attested_pipe_layers(
     attachments: Sequence[FeAttachment],
     fallback: "PipeLayers | None" = None,

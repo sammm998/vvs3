@@ -204,3 +204,50 @@ over 80**, with 221 pipes and 56 531 pt of linework reported as unattributed.
 The 420 m of that total which no leader named is published as an unnamed row
 rather than hidden: it is pipework the drawing draws and does not label
 anywhere the engine could read.
+
+
+## What the sheet is drawn with
+
+Attesting the *layer* was not enough.  A pipe layer also carries hatch, the
+layer the leaders live on also carries lettering, and two stacked labels put
+their rules a constant distance apart - which the double-line pairer reads as a
+bore.  On W501A0011 that left 9 921 pt of 0.36 pt hatch boundary (one "pipe"
+26 m long, actually the edge of a hatched wall) and 3 706 pt of 0.72 pt
+lettering rules in the take-off.
+
+So the pen is attested too, and from the same evidence: the weights the
+drawing's own verified leaders land on, counting only geometry whose bore it
+draws.  On this sheet that is 2.04 and 1.44 pt - the S3 and V2 systems - while
+the hatch at 0.36 and the lettering at 0.72 fall out.  The weight the sheet
+letters with is excluded explicitly, whatever a leader happens to land on,
+because a column of labels is not a pipe.
+
+A physical pipe is counted when most of its length is on an attested layer
+*and* drawn with an attested pen, and a single unpaired stroke is counted only
+if a verified leader landed on it.
+
+## Two readings of one code
+
+`S3-R8` written over `110` is one label.  Where the size line was not merged
+into the code the engine held both readings and marked the pipe AMBIGUOUS for
+disagreeing with itself - 13 of 33 attached runs on the production sheet.  Two
+readings where one extends the other with a size are now resolved in favour of
+the fuller one; two different codes still contradict each other.  And a reading
+that still contains an unresolved character is not a designation at all: it
+asserts something nobody wrote, and it competes with the correct reading of the
+same pipe.
+
+## W501A0011, after
+
+```
+                    reported broken     now
+take-off               1 395 m          162 m
+physical pipes           303            25 counted, 276 reported as linework
+named                     23            12 pipes, 84 m of the 162
+chain          142 -> 82 -> 116 -> 64   135 -> 81 -> 111 -> 61
+```
+
+The marked drawing traces the drawn pipework rather than the background.  What
+is still weak is stated in the report rather than hidden: 78 m of attested
+pipework that no leader named, and the S3-R8 family read without its size on
+33 labels.

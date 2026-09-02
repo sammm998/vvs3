@@ -81,3 +81,32 @@ def test_a_drawing_without_layers_counts_everything(analysis_a):
     page = analysis_a.pages[0]
     assert all(p.on_attested_layer for p in page.physical_pipes)
     assert page.diagnostics["unattributedGeometry"]["pipes"] == 0
+
+
+# --------------------------------------------------- readings of the same code
+
+def test_a_code_and_the_same_code_with_its_size_are_not_rivals():
+    """`S3-R8` over `110` is one label, read twice.
+
+    On the production sheet the size is written on the line below the code, and
+    where that line was not merged the engine held two readings of one pipe -
+    `S3-R8` and `S3-R8-110` - and marked the pipe AMBIGUOUS for disagreeing
+    with itself.  13 of 33 attached runs were lost that way.
+    """
+    from vvs_pipe.association.associate import _more_complete
+
+    assert _more_complete("S3-R8", "S3-R8-110") == "S3-R8-110"
+    assert _more_complete("S3-R8-110", "S3-R8") == "S3-R8-110"
+    assert _more_complete("S1-P2", "S1-P2-75") == "S1-P2-75"
+    # different pipes, and a suffix that is not a size, stay contradictions
+    assert _more_complete("S3-R8-110", "S3-P2-160") is None
+    assert _more_complete("S3-R8", "S3-R8B") is None
+    assert _more_complete("S3-R8", "S3-R8-A") is None
+
+
+def test_a_reading_with_an_unresolved_character_is_not_a_designation(analysis_a):
+    """It asserts something nobody wrote, and it competes with the right reading."""
+    for page in analysis_a.pages:
+        for d in page.designations:
+            if d.role.value == "PIPE_DESIGNATION":
+                assert "�" not in d.text
