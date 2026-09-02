@@ -125,3 +125,47 @@ pipe layers active: W50-VVS-FE-S3
 refused: S3-X9-50 (leader ends on fabric), S3-R8-160 (inline, no leader),
          ENL. PM-2, 2024-04-19, B2-SDLV94NN4 1000X150, title block
 ```
+
+## The production sheet, W501A0011
+
+Blind, clean-only, frozen before any comparison:
+
+```
+designations reconstructed : 142      (109 of them code-shaped instances)
+... carrying a DN          :  82
+vector leaders traced      : 116
+verified FE attachments    :  64
+physical pipes             : 303  (23 designated)
+pipe layers (discovered)   : the V-…-FE-… layers, from the geometry, never by name
+```
+
+Against the previous pipeline's counts on the same sheet - 77 / 77 / 68 / 64,
+passed on the command line and never visible to the detector - the chain now
+ends where it did: **64 verified attachments against 64**.  The earlier stages
+count differently rather than better: "designations" here is every label the
+role stage proposes, including the sheet's notes, and "leaders" is counted per
+text line, so a code and the level written under it each report one.
+
+Four defects were found by running it, each fixed and each measurable:
+
+| What was wrong | Effect on the sheet |
+| --- | --- |
+| Pipe detection ran **before** leader tracing and consumed the thin annotation strokes as pipe geometry | 148 leader strokes were gone before the tracer looked; leaders are now traced first and withheld from detection |
+| The leader was traced from the **designation's own box** | The leaders on this sheet leave from the rule under the *level* line, ~9 pt below; tracing now works from the label block |
+| The tracer **chose one** stroke and refused when two left a label | 38 code labels were refused outright; every plausible line is now traced and the *chain* decides which is a leader |
+| Nothing distinguished a leader from a pipe **running beside a label** | A pipe drawn with a similar pen was read as its own label's leader; a line that stays near *and parallel* to the run it would attach to is that pipe, not a leader |
+
+What is still short, stated plainly: **23 of 303 physical pipes carry a
+designation**.  That is not an association failure - 64 labels did attach - but
+a geometry one: 303 physical pipes on a sheet that draws far fewer means the
+dash chains are not being joined into whole pipes, so each verified attachment
+names a fragment.  That is the next thing to fix, and it is quantity work.
+
+## The second sheet, W501A0012
+
+The same run on W501A0012 reports `designations 2 -> DN 1 -> leaders 0 ->
+attachments 0`.  The chain is not at fault: the glyph stage resolved **none** of
+that sheet's 467 glyph candidates, so there is no text for a chain to start
+from.  Its facit lists `KV1-X31-16` at 3.9 m + 7.0 m and `S3-R8-75` at 3.1 m +
+3.6 m; the engine currently produces nothing to compare against them.  Reading
+that sheet's lettering is a separate defect from this one.

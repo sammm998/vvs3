@@ -26,7 +26,8 @@ from typing import Mapping, Sequence
 
 from ..canonical import canonical_sort, entity_id, qc, qs
 from ..geometry.index import SpatialIndex
-from ..geometry.primitives import BBox, Pt, Segment, dist, point_segment_distance, segments_of_polyline
+from ..geometry.primitives import (BBox, Pt, Segment, angle_diff, dist,
+                                   point_segment_distance, segments_of_polyline)
 from ..model import PipeCandidate, PipeRun, VectorObject
 from .leaders import VectorLeader
 
@@ -40,6 +41,12 @@ TIE_EPSILON_PT = 0.75
 # A layer must carry at least this share of the accepted pipe length to count
 # as a pipe-carrying layer.
 LAYER_MIN_SHARE = 0.02
+# A leader *ends at* pipework; it does not run along it.  When most of a traced
+# line lies on the run it would attach to, the line is that pipe, not a leader
+# pointing at it - which is what happens when a pipe passes beside a label and
+# the two are drawn with similar pens.
+MAX_SHARE_ALONG_RUN = 0.5
+ALONG_FLOOR_PT = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,8 +186,16 @@ def attach_leaders(
     pipe_layers: PipeLayers,
     cap_height: float,
     source_objects: Mapping[str, Sequence[str]] | None = None,
+    symbol_boxes: Sequence[BBox] = (),
 ) -> tuple[tuple[FeAttachment, ...], tuple[AttachmentFailure, ...]]:
-    """Verify each leader against the pipe geometry at its endpoint."""
+    """Verify each leader against the pipe geometry at its endpoint.
+
+    A leader may point at the pipe itself or at a symbol on it - a gully, a
+    cleaning eye, a floor drain - and pointing at the symbol is pointing at the
+    pipe that terminates there.  Where the tip lands inside a symbol, the pipe
+    reached *through* that symbol counts, provided exactly one pipe touches it:
+    two make the symbol a junction, and a junction identifies nothing.
+    """
     runs = canonical_sort(list(runs), key=lambda r: r.canonical_key())
     if not runs:
         return (), tuple(
@@ -196,12 +211,24 @@ def attach_leaders(
         tolerance = TIP_FLOOR_PT + TIP_CAP_FACTOR * max(cap_height, 1.0)
         probe = BBox(leader.tip[0] - tolerance, leader.tip[1] - tolerance,
                      leader.tip[0] + tolerance, leader.tip[1] + tolerance)
+        symbol = _symbol_at(symbol_boxes, leader.tip)
+        if symbol is not None:
+            probe = BBox(symbol.x0 - tolerance, symbol.y0 - tolerance,
+                         symbol.x1 + tolerance, symbol.y1 + tolerance)
         hits: list[tuple[float, int]] = []
         off_layer: list[tuple[float, int]] = []
         for ri in index.query_box(probe):
             run = runs[ri]
-            tol = max(TIP_FLOOR_PT, TIP_WIDTH_FACTOR * (run.width_pt or 0.0) + 2.0)
+            # A leader ends in an arrowhead, and the trace stops where the
+            # barbs fork - a few points short of the pipe.  The tolerance
+            # therefore has to allow the annotation's own scale as well as the
+            # pipe's drawn width; both are the drawing's, neither is a constant.
+            tol = max(TIP_FLOOR_PT,
+                      TIP_WIDTH_FACTOR * (run.width_pt or 0.0) + 2.0,
+                      TIP_CAP_FACTOR * max(cap_height, 1.0))
             distance = _run_distance(run, leader.tip)
+            if symbol is not None:
+                distance = min(distance, _distance_to_box(symbol, run))
             if distance > tol:
                 continue
             run_objects = (source_objects or {}).get(run.pipe_run_id) or run.source_object_ids
@@ -217,6 +244,21 @@ def attach_leaders(
                     leader.leader_id, leader.text_id, leader.tip, reason,
                     detail=(("candidatesOffLayer", str(len(off_layer))),),
                 )
+            )
+            continue
+        # "Runs along" means coincident with the pipe, not merely near it: a
+        # short leader approaching at a shallow angle is close to its pipe for
+        # most of its length and is still a leader.
+        hits = [
+            h for h in hits
+            if _share_along_run(leader, runs[h[1]],
+                                max(ALONG_FLOOR_PT, TIP_CAP_FACTOR * max(cap_height, 1.0)))
+            <= MAX_SHARE_ALONG_RUN
+        ]
+        if not hits:
+            failures.append(
+                AttachmentFailure(leader.leader_id, leader.text_id, leader.tip,
+                                  "LEADER_RUNS_ALONG_THE_PIPE")
             )
             continue
         hits.sort(key=lambda h: (h[0], runs[h[1]].canonical_key()))
@@ -249,6 +291,56 @@ def attach_leaders(
         tuple(canonical_sort(attachments, key=lambda a: a.canonical_key())),
         tuple(canonical_sort(failures, key=lambda f: f.canonical_key())),
     )
+
+
+def _share_along_run(leader: VectorLeader, run: PipeRun, tolerance: float,
+                     parallel_degrees: float = 6.0) -> float:
+    """How much of a traced line lies *on* the run it would attach to.
+
+    Both conditions matter.  Near is not enough: a short leader approaching at a
+    shallow angle is near its pipe for most of its length and is still a
+    leader.  What marks a line as being the pipe rather than pointing at it is
+    that it stays near *and* parallel - which is exactly what a wall of a
+    double-line pipe, or a second stroke of the same run, does.
+    """
+    total = 0.0
+    along = 0.0
+    run_segments = segments_of_polyline(run.centerline)
+    if not run_segments:
+        return 0.0
+    for i in range(len(leader.polyline) - 1):
+        a, b = leader.polyline[i], leader.polyline[i + 1]
+        length = dist(a, b)
+        if length <= 0.0:
+            continue
+        total += length
+        midpoint = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+        if not (_run_distance(run, a) <= tolerance and _run_distance(run, b) <= tolerance
+                and _run_distance(run, midpoint) <= tolerance):
+            continue
+        piece = Segment(a, b)
+        nearest = min(run_segments, key=lambda s: point_segment_distance(midpoint, s))
+        if math.degrees(angle_diff(piece.angle, nearest.angle)) <= parallel_degrees:
+            along += length
+    return along / total if total > 0.0 else 0.0
+
+
+def _symbol_at(symbol_boxes: Sequence[BBox], point: Pt) -> BBox | None:
+    """The symbol a leader tip landed in, if it landed in one."""
+    found = [b for b in symbol_boxes if b.contains_point(point)]
+    if len(found) != 1:
+        return None
+    return found[0]
+
+
+def _distance_to_box(box: BBox, run: PipeRun) -> float:
+    """How far a run passes from a symbol's box."""
+    best = math.inf
+    for segment in segments_of_polyline(run.centerline):
+        for corner in ((box.x0, box.y0), (box.x1, box.y0), (box.x1, box.y1), (box.x0, box.y1),
+                       ((box.x0 + box.x1) / 2.0, (box.y0 + box.y1) / 2.0)):
+            best = min(best, point_segment_distance(corner, segment))
+    return best
 
 
 def _nearest_source_object(

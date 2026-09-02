@@ -204,7 +204,23 @@ def associate_designations(
     failures: list[ChainFailure] = []
     attached_text_ids: set[str] = set()
 
+    # A label offers more than one line as a possible leader, and more than one
+    # may reach pipework.  Where they reach *connected* geometry they are
+    # saying the same thing; where they reach pipes that do not touch, the
+    # label is pointing at two different places and the drawing is not telling
+    # us which - so it names neither.
+    by_label: dict[str, list[FeAttachment]] = {}
+    for a in attachments:
+        by_label.setdefault(a.text_id, []).append(a)
+    contradicting: set[str] = set()
+    for text_id, group in sorted(by_label.items()):
+        run_ids = sorted({a.run_id for a in group})
+        if len(run_ids) > 1 and not _runs_connected(run_ids, runs_by_id):
+            contradicting.add(text_id)
+
     for a in canonical_sort(list(attachments), key=lambda x: x.canonical_key()):
+        if a.text_id in contradicting:
+            continue
         d = by_text_id.get(a.text_id)
         run = runs_by_id.get(a.run_id)
         if d is None or run is None:
@@ -263,6 +279,16 @@ def associate_designations(
     for d in labels:
         if d.text_item_id in attached_text_ids:
             continue
+        if d.text_item_id in contradicting:
+            diagnostics.append((d.designation_id, Reason.COMPETING_PIPES.value))
+            failures.append(
+                ChainFailure(
+                    text_id=d.text_item_id, designation_id=d.designation_id, text=d.text,
+                    stage="attachment", reason="LEADERS_REACH_UNCONNECTED_PIPES",
+                    bbox=d.bbox, point=None,
+                )
+            )
+            continue
         leader = leader_by_text.get(d.text_item_id)
         if leader is None:
             stage, reason, point = "leader", Reason.NO_ASSOCIATION_EVIDENCE.value, None
@@ -316,6 +342,34 @@ def associate_designations(
         counts=counts,
         proximity_hints=tuple(sorted(proximity_hints)),
     )
+
+
+def _runs_connected(run_ids: Sequence[str], runs_by_id: Mapping[str, PipeRun],
+                    tolerance: float = 2.5) -> bool:
+    """Do these runs form one piece of pipework?
+
+    Runs are connected when their ends meet, directly or through each other.
+    Two leaders from one label that land on connected runs are pointing at the
+    same pipe; ones that land on separate pipes are a contradiction.
+    """
+    remaining = [runs_by_id[r] for r in run_ids if r in runs_by_id]
+    if len(remaining) < 2:
+        return True
+    reached = [remaining[0]]
+    pool = remaining[1:]
+    changed = True
+    while changed and pool:
+        changed = False
+        for run in list(pool):
+            for known in reached:
+                if any(dist(a, b) <= tolerance
+                       for a in (run.centerline[0], run.centerline[-1])
+                       for b in (known.centerline[0], known.centerline[-1])):
+                    reached.append(run)
+                    pool.remove(run)
+                    changed = True
+                    break
+    return not pool
 
 
 def _record(store: dict[str, RunAssignment], run_id: str, value: RunAssignment) -> None:

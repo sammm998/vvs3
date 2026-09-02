@@ -48,6 +48,24 @@ def _pt(p) -> tuple[float, float]:
     return (float(p.x), float(p.y)) if hasattr(p, "x") else (float(p[0]), float(p[1]))
 
 
+def _flatten_points(vertices) -> list[tuple[float, float]]:
+    """Annotation vertices, however the viewer nests them.
+
+    A polyline hands over a flat list of points; an ink annotation hands over a
+    list of strokes, each a list of points.  Both are ink on the page, and
+    neither may crash the inventory.
+    """
+    out: list[tuple[float, float]] = []
+    for item in vertices:
+        if hasattr(item, "x"):
+            out.append((float(item.x), float(item.y)))
+        elif isinstance(item, (list, tuple)) and item and isinstance(item[0], (int, float)):
+            out.append((float(item[0]), float(item[1])))
+        elif isinstance(item, (list, tuple)):
+            out.extend(_flatten_points(item))
+    return out
+
+
 def _colour(value) -> Optional[list[float]]:
     if value is None:
         return None
@@ -356,7 +374,7 @@ class ObjectStore:
                     kind="annotation",
                     subtype=str(annot.type[1] if annot.type else annot.type[0]),
                     bbox=qbbox((rect.x0, rect.y0, rect.x1, rect.y1)),
-                    coordinates=tuple(qpoly([_pt(v) for v in vertices])) if vertices else (),
+                    coordinates=tuple(qpoly(_flatten_points(vertices))) if vertices else (),
                     transform=self.pdf.pages[number].transform,
                     style={"colours": {k: _colour(v) for k, v in sorted((annot.colors or {}).items())},
                            "border": _json_safe(annot.border)},

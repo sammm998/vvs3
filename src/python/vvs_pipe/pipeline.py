@@ -27,7 +27,7 @@ from .association import associate_designations
 from .association.attachment import (attach_leaders, discover_pipe_layers,
                                      source_objects_of_run)
 from .association.associate import ChainFailure
-from .association.leaders import leaders_by_text_item, trace_leaders
+from .association.leaders import leaders_by_text_item, lettering_pen, trace_leaders
 from .canonical import canonical_json, canonical_sort, digest, ql, qs
 from .designations import detect_panels, discover_designations, promote_designations, tier_counts
 from .dimensions import resolve_diameter
@@ -341,27 +341,32 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
     roles = classify_roles(objects, box, cap, text.consumed_object_ids)
     not_pipework = non_pipe_objects(roles)
 
-    detection = detect_pipes(
-        objects,
-        box,
-        page,
-        text.consumed_object_ids | not_pipework,
-        panel_boxes,
-        cap,
-        dash_chains=dash_chains,
-    )
-    # The drawing's own statement of which pipe a label belongs to, traced
-    # through however many objects the CAD export split it into.  Everything
-    # downstream - the role scores, the association, the take-off - rests on
-    # this rather than on how close a label happens to sit to a line.
+    # Leaders are traced *before* pipe detection, and the strokes they are made
+    # of are then withheld from it.  The order matters both ways: the detector
+    # was swallowing the thin annotation strokes as pipe geometry, so the tracer
+    # could not see them afterwards (most labels lost their leader), and the
+    # take-off counted leader lines as pipes.
     traced = trace_leaders(
         text.items,
         objects,
         cap,
-        exclude_object_ids=detection.consumed_object_ids | text.consumed_object_ids,
+        exclude_object_ids=dash_consumed,
         page=page,
+        annotation_pen=lettering_pen(objects, text.consumed_object_ids),
+        soft_exclude_object_ids=text.consumed_object_ids,
     )
     traced_by_text = leaders_by_text_item(traced)
+    leader_object_ids = frozenset(oid for l in traced for oid in l.object_ids)
+
+    detection = detect_pipes(
+        objects,
+        box,
+        page,
+        text.consumed_object_ids | not_pipework | leader_object_ids,
+        panel_boxes,
+        cap,
+        dash_chains=dash_chains,
+    )
     discovery = discover_designations(
         text.items, objects, panels, box, page,
         exclude_object_ids=detection.consumed_object_ids,
@@ -407,7 +412,8 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
     }
     pipe_layers = discover_pipe_layers(candidates, objects_by_id)
     attachments, attachment_failures = attach_leaders(
-        traced, runs, objects_by_id, pipe_layers, cap, source_objects=run_source_objects
+        traced, runs, objects_by_id, pipe_layers, cap,
+        source_objects=run_source_objects, symbol_boxes=detection.symbol_boxes,
     )
 
     association = associate_designations(
