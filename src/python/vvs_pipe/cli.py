@@ -41,6 +41,11 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--out", type=Path, default=Path("artifacts/run"))
     run.add_argument("--forensics", action="store_true", help="export all intermediates")
     run.add_argument("--ground-truth", type=Path, default=None, help="post-hoc comparison only")
+    run.add_argument(
+        "--debug-crops",
+        action="store_true",
+        help="render a local crop for every stage of the evidence chain that failed",
+    )
 
     args = parser.parse_args(argv)
     if args.command != "analyse":  # pragma: no cover - argparse enforces this
@@ -60,10 +65,21 @@ def main(argv: list[str] | None = None) -> int:
         debug_path = render_debug(result, out / "debug.pdf")
         _write_forensic_dump(result, out / "forensics")
 
+    crops = []
+    if args.debug_crops or _truthy("RUN_DEBUG_CROPS"):
+        from .rendering.crops import render_crops, requests_from_result
+
+        cap = result.pages[0].text_cap_height if result.pages else 7.0
+        crops = render_crops(result.source_path, requests_from_result(result),
+                             out / "debug_crops", cap_height=cap)
+
     print(f"forensics      : {out / 'forensics.json'}")
     print(f"analysis       : {out / 'analysis.json'}")
     print(f"marked drawing : {marked}")
     print(f"quantities     : {quantities_csv}")
+    _print_chain_census(result)
+    if crops:
+        print(f"debug crops    : {out / 'debug_crops'}  ({len(crops)} failed stages)")
     if debug_path:
         print(f"debug drawing  : {debug_path}")
     print(f"canonicalDigest: {result.canonical_digest()}")
@@ -84,6 +100,34 @@ def main(argv: list[str] | None = None) -> int:
         print(f"post-test      : {out / 'post_test_comparison.json'}")
         print(canonical_json(report["summary"], indent=2))
     return 0
+
+
+def _print_chain_census(result) -> None:
+    """The stage-by-stage census of the association chain.
+
+    Printed on every run because it is the number that says whether the engine
+    is *identifying* pipes or merely measuring them: geometry can be perfect
+    while every label fails to attach, and a single "designations: n" line
+    hides exactly that.
+    """
+    for page_result in result.pages:
+        chain = page_result.diagnostics.get("associationChain")
+        if not chain:
+            continue
+        layers = chain.get("pipeLayers", {})
+        print(
+            f"chain page {page_result.page}   "
+            f"designations {chain.get('designationOccurrences', 0)}"
+            f" -> with DN {chain.get('designationsWithDn', 0)}"
+            f" -> vector leaders {chain.get('vectorLeaders', 0)}"
+            f" -> verified attachments {chain.get('verifiedAttachments', 0)}"
+        )
+        print(
+            f"               physical pipes {chain.get('physicalPipes', 0)},"
+            f" designated {chain.get('physicalPipesDesignated', 0)};"
+            f" pipe layers {'active ' + ','.join(layers.get('layers', [])) if layers.get('active') else 'not declared by this file'};"
+            f" proximity hints not used {len(chain.get('proximityHintsNotUsed', []))}"
+        )
 
 
 def _write_quantities_csv(result, path: Path) -> Path:

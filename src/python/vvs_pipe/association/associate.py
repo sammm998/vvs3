@@ -1,19 +1,25 @@
-"""Designation <-> pipe association.
+"""Designation <-> pipe association, over the drawing's own evidence chain.
 
-Every association is backed by geometric evidence and every score is
-decomposed, so a decision can be explained.  The rules the specification
-forbids - nearest-only, longest-only, first-in-array, object id, arbitrary
-tie-break - appear nowhere: when two runs are equally supported the result is
-AMBIGUOUS and no quantity is produced from it.
+    vector glyphs -> a complete designation (with its DN)
+                  -> the vector leader the draughtsman drew
+                  -> that leader's endpoint
+                  -> geometry on a pipe-carrying layer
+                  -> the run, and so the physical pipe
 
-Two mechanisms are used, in order:
+Only that chain binds a label to a pipe.  This module used to offer a second
+route - an "inline" argument that bound a label to a run because it sat close to
+it, with orientation and size as corroboration - and that route is what turned
+dates, `ENL. PM-1`, drawing cross-references and title-block strings into pipe
+designations: all of them sit close to linework on a plan sheet, so closeness
+identifies nothing.  Proximity is still *measured*, because knowing how many
+labels would have been bound by it is worth reporting, but it can no longer
+produce an association.
 
-1. **direct association** - a label is bound to a run by its leader line, or
-   by proximity combined with orientation agreement and size consistency;
-2. **propagation** - an unlabelled run inherits a neighbour's designation only
-   across a connection whose drawn width matches, and only when exactly one
-   designation reaches it first.  Two designations arriving equally far away
-   leave the run AMBIGUOUS.
+What remains besides the chain is propagation: an unlabelled run inherits a
+neighbour's designation across a connection whose drawn width matches, seeded
+only from chain-verified assignments, and only when exactly one designation
+reaches it first.  That is topology, not proximity - the two runs are the same
+pipe - and a propagated run is never CONFIRMED.
 """
 
 from __future__ import annotations
@@ -36,10 +42,9 @@ from ..geometry.primitives import (
 from ..model import Designation, PipeRun
 from ..states import IdentityState, Reason, TextRole
 from ..topology.physical import RunAssignment
+from .attachment import AttachmentFailure, FeAttachment
+from .leaders import VectorLeader
 
-LEADER_HIT_FLOOR_PT = 4.0
-LEADER_HIT_WIDTH_FACTOR = 0.75  # a leader points at the pipe *wall*, not its axis
-LEADER_SUFFICIENT_SCORE = 0.50
 NEUTRAL_EVIDENCE = 0.5
 CONFLICTING_SIZE_SCORE = 0.2
 # How far a run's measured width may sit from the size its label states before
@@ -47,16 +52,97 @@ CONFLICTING_SIZE_SCORE = 0.2
 # width is measured through the scale and a nominal size is not an outside
 # diameter; anything past it is a disagreement no tolerance explains.
 SIZE_CONFLICT_RELATIVE = 0.30
+# Radius, in cap heights, within which a label is *reported* as having a
+# proximity hint.  Nothing is bound by it.
 PROXIMITY_RADIUS_CAP_FACTOR = 9.0
-# Half-weight distance for an inline label, in cap heights.  Measured on real
-# lettering: a label beside its pipe sits nearer than one cap height from the
-# axis, so credit has to fall away over that scale rather than over the whole
-# search radius.
-INLINE_CAPS = 1.2
-SCORE_TIE_EPSILON = 0.06
-MIN_DIRECT_SCORE = 0.40
 WIDTH_RELATIVE_TOLERANCE = 0.12
 RUN_JOIN_TOLERANCE_PT = 1.5
+
+
+@dataclass(frozen=True, slots=True)
+class ChainCounts:
+    """The stage-by-stage census the acceptance run compares against."""
+
+    designation_occurrences: int
+    designations_with_dn: int
+    vector_leaders: int
+    verified_attachments: int
+    confirmed_designations: int
+    designated_runs: int
+
+    def to_canonical(self) -> dict:
+        return {
+            "designationOccurrences": self.designation_occurrences,
+            "designationsWithDn": self.designations_with_dn,
+            "vectorLeaders": self.vector_leaders,
+            "verifiedAttachments": self.verified_attachments,
+            "confirmedDesignations": self.confirmed_designations,
+            "designatedRuns": self.designated_runs,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ChainLink:
+    """One complete evidence chain, from glyphs to a physical pipe."""
+
+    designation_id: str
+    text_id: str
+    designation: str
+    diameter_mm: float | None
+    glyph_ids: tuple[str, ...]
+    leader_id: str
+    leader_object_ids: tuple[str, ...]
+    leader_tip: tuple[float, float]
+    fe_object_id: str
+    fe_layer: str | None
+    pipe_run_id: str
+    physical_pipe_id: str | None = None
+
+    def canonical_key(self) -> tuple:
+        return (self.designation, self.text_id, self.pipe_run_id)
+
+    def to_canonical(self) -> dict:
+        return {
+            "designationId": self.designation_id,
+            "textId": self.text_id,
+            "designation": self.designation,
+            "diameterMm": self.diameter_mm,
+            "glyphIds": list(self.glyph_ids),
+            "leaderId": self.leader_id,
+            "leaderObjectIds": list(self.leader_object_ids),
+            "leaderTip": [qs(self.leader_tip[0]), qs(self.leader_tip[1])],
+            "feObjectId": self.fe_object_id,
+            "feLayer": self.fe_layer,
+            "pipeRunId": self.pipe_run_id,
+            "physicalPipeId": self.physical_pipe_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ChainFailure:
+    """A label that did not complete the chain, and where it stopped."""
+
+    text_id: str
+    designation_id: str | None
+    text: str
+    stage: str
+    reason: str
+    bbox: BBox
+    point: tuple[float, float] | None = None
+
+    def canonical_key(self) -> tuple:
+        return (self.stage, self.text, self.text_id)
+
+    def to_canonical(self) -> dict:
+        return {
+            "textId": self.text_id,
+            "designationId": self.designation_id,
+            "text": self.text,
+            "stage": self.stage,
+            "reason": self.reason,
+            "bbox": self.bbox.to_canonical(),
+            "point": [qs(self.point[0]), qs(self.point[1])] if self.point else None,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +150,10 @@ class AssociationResult:
     assignments: dict[str, RunAssignment]
     designation_to_runs: dict[str, tuple[str, ...]]
     diagnostics: tuple[tuple[str, str], ...]
+    chains: tuple[ChainLink, ...] = ()
+    failures: tuple[ChainFailure, ...] = ()
+    counts: ChainCounts | None = None
+    proximity_hints: tuple[tuple[str, str, float], ...] = ()
 
 
 def _run_distance(run: PipeRun, point: tuple[float, float]) -> float:
@@ -87,189 +177,144 @@ def _run_orientation(run: PipeRun, point: tuple[float, float]) -> float:
 def associate_designations(
     designations: Sequence[Designation],
     runs: Sequence[PipeRun],
-    leaders: Mapping[str, tuple[Segment, ...]],
+    leaders: Sequence[VectorLeader],
+    attachments: Sequence[FeAttachment],
+    attachment_failures: Sequence[AttachmentFailure],
     diameter_of_run: Mapping[str, float | None],
     text_cap_height: float,
 ) -> AssociationResult:
+    """Bind labels to pipes, and only where the drawing said so."""
     runs = canonical_sort(list(runs), key=lambda r: r.canonical_key())
+    runs_by_id = {r.pipe_run_id: r for r in runs}
     labels = [
         d
         for d in canonical_sort(list(designations), key=lambda d: d.canonical_key())
         if d.role is TextRole.PIPE_DESIGNATION and not d.is_legend
     ]
-    index: SpatialIndex[int] = SpatialIndex.for_items(
-        [(BBox.from_points(r.centerline), i) for i, r in enumerate(runs)]
-    )
-    radius = PROXIMITY_RADIUS_CAP_FACTOR * max(text_cap_height, 1.0)
+    by_text_id = {d.text_item_id: d for d in labels}
+    leader_by_text = {l.text_id: l for l in leaders}
+    failure_by_text: dict[str, AttachmentFailure] = {}
+    for f in attachment_failures:
+        failure_by_text.setdefault(f.text_id, f)
 
     assignments: dict[str, RunAssignment] = {}
     designation_to_runs: dict[str, list[str]] = {}
     diagnostics: list[tuple[str, str]] = []
+    chains: list[ChainLink] = []
+    failures: list[ChainFailure] = []
+    attached_text_ids: set[str] = set()
 
-    for d in labels:
-        anchor = d.bbox.center
-        scored: list[tuple[float, int, tuple[tuple[str, float], ...]]] = []
-        scored_callout: list[tuple[float, int, tuple[tuple[str, float], ...]]] = []
-        scored_inline: list[tuple[float, int, tuple[tuple[str, float], ...]]] = []
-        leader_landed = False
-        for ri in index.query_box(d.bbox.expanded(radius)):
-            run = runs[ri]
-            evidence: list[tuple[str, float]] = []
-            proximity = _run_distance(run, anchor)
-            if proximity > radius:
-                continue
-            prox_score = max(0.0, 1.0 - proximity / radius)
-            evidence.append(("proximity", qs(prox_score)))
-            # Closeness measured in the drawing's own text size rather than as
-            # a fraction of the search radius.  These are two different
-            # questions: "is this label in the neighbourhood" and "is this
-            # label sitting on this pipe", and only the second identifies an
-            # inline label.  Measured on real lettering, an inline label's
-            # centre is under one cap height from the axis while a callout sits
-            # several away, so credit falls off over that scale.
-            inline_score = 1.0 / (1.0 + (proximity / max(INLINE_CAPS * text_cap_height, 1e-6)) ** 2)
-            evidence.append(("inline", qs(inline_score)))
-
-            # A leader is drawn to the pipe's *wall*, so the tolerance has to
-            # grow with the drawn width; measuring to the axis and demanding a
-            # fixed few points would reject every leader on a large pipe.
-            tol = max(
-                LEADER_HIT_FLOOR_PT,
-                LEADER_HIT_WIDTH_FACTOR * (run.width_pt or 0.0) + 2.0,
-            )
-            leader_score = 0.0
-            for seg in leaders.get(d.designation_id, ()):
-                for tip in (seg.a, seg.b):
-                    if d.bbox.expanded(text_cap_height).contains_point(tip):
-                        continue
-                    hit = _run_distance(run, tip)
-                    if hit <= tol:
-                        leader_score = max(leader_score, 1.0 - hit / tol)
-            evidence.append(("leader", qs(leader_score)))
-
-            # Orientation and size are *corroborating* evidence.  Where they
-            # are unavailable they stay neutral rather than counting against an
-            # association, so a label set perpendicular to its pipe - which is
-            # ordinary practice - is not rejected for that reason alone.
-            text_angle = math.radians(d.rotation)
-            orient = max(
-                0.0, 1.0 - angle_diff(text_angle, _run_orientation(run, anchor)) / (math.pi / 2)
-            )
-            orient_score = max(orient, NEUTRAL_EVIDENCE if leader_score > 0 else 0.0)
-            evidence.append(("orientation", qs(orient_score)))
-
-            size_score = NEUTRAL_EVIDENCE
-            size_conflict = False
-            measured = diameter_of_run.get(run.pipe_run_id)
-            if d.diameter_mm is not None and measured is not None:
-                rel = abs(measured - d.diameter_mm) / max(d.diameter_mm, 1e-6)
-                size_conflict = rel > SIZE_CONFLICT_RELATIVE
-                size_score = CONFLICTING_SIZE_SCORE if size_conflict else 1.0
-            evidence.append(("sizeConsistency", qs(size_score)))
-
-            # Drawings label pipes in two quite different ways, and each is a
-            # complete argument in its own right rather than a term in one
-            # blended sum.
-            #
-            # A *callout* stands off from the pipe and is joined to it by a
-            # leader; the leader carries the identification and the label may
-            # be many cap heights away.
-            #
-            # An *inline label* is written on the pipe with no leader at all.
-            # This is the majority on a real sheet, and the old scheme could
-            # not accept any of them: with the leader term at zero, nothing
-            # else could reach the threshold, so 110 correctly read labels were
-            # discarded for NO_ASSOCIATION_EVIDENCE while sitting a fraction of
-            # a cap height from the pipe they named.
-            #
-            # Taking the stronger of the two arguments keeps the callout path
-            # exactly as it was.  What stops the inline path from degenerating
-            # into "nearest wins" is the tie test below: two runs equally close
-            # leave the label AMBIGUOUS rather than bound to whichever sorted
-            # first.
-            callout = (
-                0.50 * leader_score
-                + 0.25 * prox_score
-                + 0.10 * orient_score
-                + 0.15 * size_score
-            )
-            # A label that states its own nominal size and a run that was
-            # measured are two numbers the drawing supplied about the same
-            # thing.  When they contradict each other, binding them asserts
-            # something the drawing does not say - a label reading "-110" bound
-            # to a run measured at 533 mm is simply the wrong pipe - so the
-            # inline argument is withdrawn entirely rather than merely
-            # discounted.  A leader is exempt: there the drawing has stated the
-            # pairing explicitly, and the disagreement is a dimension question
-            # for the dimension stage to report, not grounds to discard it.
-            inline = (
-                0.0
-                if size_conflict
-                else 0.55 * inline_score + 0.15 * orient_score + 0.30 * size_score
-            )
-            if leader_score >= LEADER_SUFFICIENT_SCORE:
-                # A leader that lands on the pipe is direct evidence; it stands
-                # on its own even when the corroborating signals are silent.
-                callout = max(callout, MIN_DIRECT_SCORE + 0.5 * leader_score)
-            leader_landed = leader_landed or leader_score > 0.0
-            scored_callout.append((callout, ri, tuple(evidence)))
-            scored_inline.append((inline, ri, tuple(evidence)))
-
-        # A drawn leader is the drawing saying which pipe it means.  Once one
-        # has landed, a neighbouring pipe that the label happens to lie near is
-        # not a competing claim, so the inline argument is not offered at all -
-        # without this, a callout standing close to an unrelated pipe reports
-        # COMPETING_PIPES and loses an association the drawing stated plainly.
-        scored = scored_callout if leader_landed else [
-            max(pair, key=lambda t: t[0])
-            for pair in zip(scored_callout, scored_inline)
-        ]
-
-        scored.sort(key=lambda t: (-qs(t[0]), runs[t[1]].canonical_key()))
-        if not scored or scored[0][0] < MIN_DIRECT_SCORE:
-            diagnostics.append((d.designation_id, Reason.NO_ASSOCIATION_EVIDENCE.value))
+    for a in canonical_sort(list(attachments), key=lambda x: x.canonical_key()):
+        d = by_text_id.get(a.text_id)
+        run = runs_by_id.get(a.run_id)
+        if d is None or run is None:
             continue
-        if len(scored) > 1 and scored[0][0] - scored[1][0] < SCORE_TIE_EPSILON:
-            diagnostics.append((d.designation_id, Reason.COMPETING_PIPES.value))
-            for score, ri, ev in scored[:2]:
-                _record(
-                    assignments,
-                    runs[ri].pipe_run_id,
-                    RunAssignment(
-                        designation=None,
-                        designation_ids=(d.designation_id,),
-                        diameter_mm=diameter_of_run.get(runs[ri].pipe_run_id),
-                        state=IdentityState.AMBIGUOUS,
-                        reasons=(Reason.AMBIGUOUS_ASSOCIATION, Reason.COMPETING_PIPES),
-                        association_confidence=qs(score),
-                        evidence=ev,
-                    ),
-                )
-            continue
-
-        score, ri, ev = scored[0]
-        run = runs[ri]
+        leader = leader_by_text.get(a.text_id)
+        attached_text_ids.add(a.text_id)
+        measured = diameter_of_run.get(run.pipe_run_id)
+        size_score = NEUTRAL_EVIDENCE
+        if d.diameter_mm is not None and measured is not None:
+            rel = abs(measured - d.diameter_mm) / max(d.diameter_mm, 1e-6)
+            size_score = CONFLICTING_SIZE_SCORE if rel > SIZE_CONFLICT_RELATIVE else 1.0
+        evidence = (
+            ("leaderTraced", 1.0),
+            ("leaderLengthPt", qs(leader.length if leader else 0.0)),
+            ("attachmentDistancePt", qs(a.distance_pt)),
+            ("feLayerVerified", 1.0 if a.fe_layer else 0.0),
+            ("sizeConsistency", qs(size_score)),
+        )
         _record(
             assignments,
             run.pipe_run_id,
             RunAssignment(
                 designation=d.text,
                 designation_ids=(d.designation_id,),
-                diameter_mm=diameter_of_run.get(run.pipe_run_id),
-                state=IdentityState.CONFIRMED if score >= 0.75 else IdentityState.HIGH_CONFIDENCE,
+                diameter_mm=measured,
+                state=IdentityState.CONFIRMED,
                 reasons=(),
-                association_confidence=qs(score),
-                evidence=ev,
+                association_confidence=qs(min(1.0, 0.75 + 0.25 * (1.0 if a.fe_layer else 0.0))),
+                evidence=evidence,
             ),
         )
         designation_to_runs.setdefault(d.designation_id, []).append(run.pipe_run_id)
+        chains.append(
+            ChainLink(
+                designation_id=d.designation_id,
+                text_id=d.text_item_id,
+                designation=d.text,
+                diameter_mm=d.diameter_mm,
+                glyph_ids=tuple(d.glyph_ids),
+                leader_id=a.leader_id,
+                leader_object_ids=tuple(leader.object_ids) if leader else (),
+                leader_tip=a.tip,
+                fe_object_id=a.fe_object_id,
+                fe_layer=a.fe_layer,
+                pipe_run_id=run.pipe_run_id,
+            )
+        )
+
+    # Everything that did not complete the chain says where it stopped, so the
+    # failure can be looked at rather than argued about.
+    proximity_hints: list[tuple[str, str, float]] = []
+    index: SpatialIndex[int] = SpatialIndex.for_items(
+        [(BBox.from_points(r.centerline), i) for i, r in enumerate(runs)]
+    ) if runs else None
+    radius = PROXIMITY_RADIUS_CAP_FACTOR * max(text_cap_height, 1.0)
+    for d in labels:
+        if d.text_item_id in attached_text_ids:
+            continue
+        leader = leader_by_text.get(d.text_item_id)
+        if leader is None:
+            stage, reason, point = "leader", Reason.NO_ASSOCIATION_EVIDENCE.value, None
+        else:
+            failure = failure_by_text.get(d.text_item_id)
+            stage = "attachment"
+            reason = failure.reason if failure else "TIP_REACHES_NO_PIPE"
+            point = leader.tip
+        diagnostics.append((d.designation_id, Reason.NO_ASSOCIATION_EVIDENCE.value))
+        failures.append(
+            ChainFailure(
+                text_id=d.text_item_id,
+                designation_id=d.designation_id,
+                text=d.text,
+                stage=stage,
+                reason=reason,
+                bbox=d.bbox,
+                point=point,
+            )
+        )
+        # measured, never used: how near the closest run happens to be
+        if index is not None:
+            anchor = d.bbox.center
+            best = math.inf
+            best_run = ""
+            for ri in index.query_box(d.bbox.expanded(radius)):
+                distance = _run_distance(runs[ri], anchor)
+                if distance < best:
+                    best, best_run = distance, runs[ri].pipe_run_id
+            if best <= radius:
+                proximity_hints.append((d.designation_id, best_run, qs(best)))
 
     _propagate(runs, assignments, diameter_of_run, diagnostics)
+
+    designated_runs = len([1 for a in assignments.values() if a.designation])
+    counts = ChainCounts(
+        designation_occurrences=len(labels),
+        designations_with_dn=len([d for d in labels if d.diameter_mm is not None]),
+        vector_leaders=len({l.text_id for l in leaders if l.text_id in by_text_id}),
+        verified_attachments=len(attached_text_ids),
+        confirmed_designations=len({c.designation for c in chains}),
+        designated_runs=designated_runs,
+    )
 
     return AssociationResult(
         assignments=assignments,
         designation_to_runs={k: tuple(sorted(v)) for k, v in sorted(designation_to_runs.items())},
         diagnostics=tuple(sorted(set(diagnostics))),
+        chains=tuple(canonical_sort(chains, key=lambda c: c.canonical_key())),
+        failures=tuple(canonical_sort(failures, key=lambda f: f.canonical_key())),
+        counts=counts,
+        proximity_hints=tuple(sorted(proximity_hints)),
     )
 
 

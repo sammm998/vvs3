@@ -18,12 +18,16 @@ Stage order follows the specification:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Sequence
 
 from .artwork import detect_artwork
 from .association import associate_designations
+from .association.attachment import (attach_leaders, discover_pipe_layers,
+                                     source_objects_of_run)
+from .association.associate import ChainFailure
+from .association.leaders import leaders_by_text_item, trace_leaders
 from .canonical import canonical_json, canonical_sort, digest, ql, qs
 from .designations import detect_panels, discover_designations, promote_designations, tier_counts
 from .dimensions import resolve_diameter
@@ -84,6 +88,13 @@ class PageResult:
     scale: ScaleResult
     panels: tuple[Any, ...]
     diagnostics: dict[str, Any]
+    # The evidence chain, kept whole so the overlay and the report can show it:
+    # the leaders that were traced, the ones that reached pipe geometry, the
+    # complete chains, and where the rest stopped.
+    leaders: tuple[Any, ...] = ()
+    attachments: tuple[Any, ...] = ()
+    chains: tuple[Any, ...] = ()
+    chain_failures: tuple[Any, ...] = ()
 
 
 @dataclass(slots=True)
@@ -339,8 +350,22 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
         cap,
         dash_chains=dash_chains,
     )
+    # The drawing's own statement of which pipe a label belongs to, traced
+    # through however many objects the CAD export split it into.  Everything
+    # downstream - the role scores, the association, the take-off - rests on
+    # this rather than on how close a label happens to sit to a line.
+    traced = trace_leaders(
+        text.items,
+        objects,
+        cap,
+        exclude_object_ids=detection.consumed_object_ids | text.consumed_object_ids,
+        page=page,
+    )
+    traced_by_text = leaders_by_text_item(traced)
     discovery = discover_designations(
-        text.items, objects, panels, box, page, exclude_object_ids=detection.consumed_object_ids
+        text.items, objects, panels, box, page,
+        exclude_object_ids=detection.consumed_object_ids,
+        traced_leaders=traced_by_text,
     )
     singles = (
         single_line_candidates(detection.leftover, page, cap, discovery.leader_object_ids)
@@ -367,17 +392,32 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
             None if (r.width_pt is None or mpp is None) else round(r.width_pt * mpp * 1000.0, 1)
         )
 
-    leaders_by_designation: dict[str, tuple[Segment, ...]] = {}
-    text_to_designation = {d.text_item_id: d.designation_id for d in discovery.designations}
-    for text_id, seg in discovery.leaders:
-        did = text_to_designation.get(text_id)
-        if did is None:
-            continue
-        leaders_by_designation.setdefault(did, ())
-        leaders_by_designation[did] = leaders_by_designation[did] + (seg,)
+    # Which layers actually carry pipework, discovered from the geometry the
+    # engine accepted rather than from any layer's name.
+    objects_by_id = {o.object_id: o for o in all_objects}
+    candidates_by_id = {c.candidate_id: c for c in candidates}
+    candidate_of_edge = {e.edge_id: e.candidate_id for e in graph.edges}
+    candidate_ids_of_run = {
+        r.pipe_run_id: sorted({candidate_of_edge[e] for e in r.edge_ids if e in candidate_of_edge})
+        for r in runs
+    }
+    run_source_objects = {
+        r.pipe_run_id: source_objects_of_run(r, candidates_by_id, candidate_ids_of_run)
+        for r in runs
+    }
+    pipe_layers = discover_pipe_layers(candidates, objects_by_id)
+    attachments, attachment_failures = attach_leaders(
+        traced, runs, objects_by_id, pipe_layers, cap, source_objects=run_source_objects
+    )
 
     association = associate_designations(
-        discovery.designations, runs, leaders_by_designation, measured_diameter, cap
+        discovery.designations,
+        runs,
+        traced,
+        attachments,
+        attachment_failures,
+        measured_diameter,
+        cap,
     )
 
     verticals = analyse_verticals(
@@ -434,6 +474,30 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
 
     pipes = build_physical_pipes(runs, resolved, page, mpp, verticals.by_run)
 
+    # Complete each chain with the physical pipe its run ended up in, so the
+    # published chain runs from the glyphs all the way to the measured entity.
+    pipe_of_run: dict[str, str] = {}
+    for physical in pipes:
+        for rid in physical.pipe_run_ids:
+            pipe_of_run[rid] = physical.physical_pipe_id
+    chains = tuple(
+        replace(link, physical_pipe_id=pipe_of_run.get(link.pipe_run_id))
+        for link in association.chains
+    )
+    chain_failures = tuple(association.failures) + tuple(
+        ChainFailure(
+            text_id=link.text_id,
+            designation_id=link.designation_id,
+            text=link.designation,
+            stage="physical_pipe",
+            reason="RUN_NOT_IN_A_PHYSICAL_PIPE",
+            bbox=BBox.from_points([link.leader_tip, link.leader_tip]),
+            point=link.leader_tip,
+        )
+        for link in chains
+        if link.physical_pipe_id is None
+    )
+
     # Only now can text be told from a designation.  Everything above read the
     # sheet; this reads back what the geometry accepted, and nothing that no
     # pipe accepted is published as a designation.
@@ -452,6 +516,19 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
         "leaderObjects": len(discovery.leader_object_ids),
         "symbolBoxes": [b.to_canonical() for b in detection.symbol_boxes],
         "associationDiagnostics": [list(x) for x in association.diagnostics],
+        "associationChain": {
+            **(association.counts.to_canonical() if association.counts else {}),
+            "physicalPipesDesignated": len([p for p in pipes if p.designation]),
+            "physicalPipes": len(pipes),
+            "pipeLayers": pipe_layers.to_canonical(),
+            "attachmentFailures": [f.to_canonical() for f in attachment_failures],
+            "chainFailures": [f.to_canonical() for f in chain_failures],
+            "proximityHintsNotUsed": [
+                {"designationId": d, "pipeRunId": r, "distancePt": v}
+                for d, r, v in association.proximity_hints
+            ],
+        },
+        "evidenceChains": [c.to_canonical() for c in chains],
         "dimensionReconciliation": dimension_notes,
         "scaleState": scale.state.value,
         "unresolvedGlyphs": sum(1 for g in text.glyphs if g.character is None),
@@ -485,4 +562,8 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
         scale=scale,
         panels=panels,
         diagnostics=diagnostics,
+        leaders=traced,
+        attachments=attachments,
+        chains=chains,
+        chain_failures=chain_failures,
     )

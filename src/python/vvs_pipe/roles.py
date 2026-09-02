@@ -274,7 +274,13 @@ def _layer_signatures(
         long_fraction = sum(1.0 for e in extents if e >= LONG_STROKE_CAPS * cap) / n
         text_fraction = sum(1.0 for m in members if m.object_id in text_object_ids) / n
 
-        dashes = [m.dashes for m in members if m.dashes]
+        # A PDF states "solid" as a dash *declaration* - ``[] 0`` - so the
+        # presence of the string says nothing.  Counting it as a dash made every
+        # layer of long solid strokes look like centre lines: the reference-line
+        # rule is "long, dashed and unconnected", and with this wrong the first
+        # term fired on solid pipework and the layer was deleted before pipe
+        # detection ever saw it.
+        dashes = [m.dashes for m in members if _declares_dashes(m.dashes)]
         dominant_dash: str | None = None
         if dashes:
             counts: dict[str, int] = {}
@@ -420,6 +426,21 @@ def _layer_role(
     if best_score < 0.45 or margin < 0.10:
         return DrawingRole.UNKNOWN, 0.0, ev
     return best, min(0.95, best_score), ev
+
+
+def _declares_dashes(declaration: str | None) -> bool:
+    """True only when the dash array actually contains a non-zero run."""
+    if not declaration:
+        return False
+    text = declaration.strip()
+    inside = text[text.find("[") + 1: text.find("]")] if "[" in text and "]" in text else text
+    for token in inside.replace(",", " ").split():
+        try:
+            if float(token) > 0.0:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _chain_fraction(members: Sequence[VectorObject], cap: float) -> float:

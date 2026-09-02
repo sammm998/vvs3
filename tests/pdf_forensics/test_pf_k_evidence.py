@@ -35,11 +35,18 @@ def test_the_association_chain_reaches_the_leader_and_the_glyphs(analysis_a):
     assert "OBJECT_YIELDS_GLYPH" in relations
 
 
-def test_rejected_competitors_are_recorded(analysis_a, analysis_b):
-    workspaces = [analysis_a[0], analysis_b[0]]
-    assert any(w.evidence.rejections for w in workspaces), \
-        "at least one sheet has a designation that lost"
-    for workspace in workspaces:
+def test_competing_claims_are_recorded_rather_than_resolved(analysis_a, analysis_b):
+    """Where two labels point at one pipe, neither wins and both are kept."""
+    for workspace, _ in (analysis_a, analysis_b):
+        claims: dict[str, set[str]] = {}
+        for association in workspace.associations:
+            candidate = next(c for c in workspace.candidates
+                             if c.candidate_id == association.candidate_id)
+            claims.setdefault(association.pipe_id, set()).add(candidate.text)
+        for pipe_id, texts in claims.items():
+            if len(texts) > 1:
+                states = {a.state for a in workspace.associations if a.pipe_id == pipe_id}
+                assert states == {"AMBIGUOUS"}, (pipe_id, texts, states)
         for rejection in workspace.evidence.rejections:
             assert rejection["reason"], rejection
 

@@ -87,6 +87,7 @@ class Workspace:
     runs: list[PipeRun] = field(default_factory=list)
     physical_pipes: list[PhysicalPipe] = field(default_factory=list)
     associations: list[Association] = field(default_factory=list)
+    proximity_hints: list[dict] = field(default_factory=list)
     resolved: dict[str, Association] = field(default_factory=dict)
     dimension_tokens: list[dimensions.DimensionToken] = field(default_factory=list)
     scale: Optional[scale_mod.ScaleResult] = None
@@ -304,9 +305,10 @@ def analyse(path: str | Path, order: str = "normal", *, with_bank: bool = True,
     token_index = dimensions.token_spatial_index(workspace.dimension_tokens)
 
     # 15 - association, both directions --------------------------------------
-    workspace.associations = stage("association", lambda: designation_search.associate(
-        _reorder(workspace.candidates, order), _reorder(workspace.physical_pipes, order),
-        workspace.leaders_by_text, workspace.text_items))
+    workspace.associations, workspace.proximity_hints = stage(
+        "association", lambda: designation_search.associate(
+            _reorder(workspace.candidates, order), _reorder(workspace.physical_pipes, order),
+            workspace.leaders_by_text, workspace.text_items))
     workspace.resolved, rejected = designation_search.resolve(workspace.associations)
     for association in workspace.associations:
         graph.declare(association.association_id, "association")
@@ -327,6 +329,15 @@ def analyse(path: str | Path, order: str = "normal", *, with_bank: bool = True,
         designation = None
         designation_state = State.UNRESOLVED
         reasons: tuple[str, ...] = (Reason.NO_DESIGNATION,)
+        # Only a chain the drawing stated - designation, leader, geometry at the
+        # leader's end - may put a name on a pipe.  An association resting on
+        # one direction is proximity wearing a score, and proximity names
+        # nothing: the pipe is reported unnamed, with the competing evidence
+        # kept beside it.
+        if association is not None and association.state != State.CONFIRMED:
+            designation_state = State.AMBIGUOUS
+            reasons = tuple(sorted(set(association.reasons) | {Reason.NO_DESIGNATION}))
+            association = None
         if association is not None:
             candidate = by_candidate[association.candidate_id]
             designation = candidate.text
@@ -449,8 +460,8 @@ def _widened_backward(workspace: Workspace, unnamed: Sequence[PhysicalPipe]) -> 
     Anything found this way is still subject to the same rules: it must beat
     its competitors, and a single direction of support keeps it AMBIGUOUS.
     """
-    extra = designation_search.associate(workspace.candidates, list(unnamed),
-                                         workspace.leaders_by_text, workspace.text_items)
+    extra, _hints = designation_search.associate(workspace.candidates, list(unnamed),
+                                                 workspace.leaders_by_text, workspace.text_items)
     fresh = [a for a in extra
              if not any(existing.candidate_id == a.candidate_id
                         and existing.pipe_id == a.pipe_id
@@ -503,6 +514,7 @@ def _build_report(workspace: Workspace, store: ObjectStore, path_model: PathMode
         "reconciliation": reconciliation,
         "validation": validation.report(checks, coverage),
         "adaptive": workspace.adaptive,
+        "proximityHintsNotUsed": workspace.proximity_hints,
         "duplicatesDropped": list(dropped),
         "quantities": workspace.quantities,
         "physicalPipes": [p.to_json() for p in workspace.physical_pipes],

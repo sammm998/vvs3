@@ -36,10 +36,8 @@ from ..states import DesignationTier, IdentityState, Reason, TextRole
 # happened to accept is not evidence that the note names a pipe.
 MIN_PROMOTED_LENGTH_PT = 1.0
 
-# How much the label must be aligned with its pipe before alignment alone counts
-# as the label being *about* that pipe.  Below this the association rests on
-# proximity, and proximity is what puts a note next to whatever happens to run
-# past it.
+# Kept for the report's vocabulary only: alignment is measured and published as
+# evidence, but it no longer promotes anything on its own.
 MIN_ALIGNMENT_FOR_CONFIRMATION = 0.75
 
 
@@ -128,22 +126,20 @@ def _pointed_at_a_pipe(
     run_ids: Sequence[str],
     assignments: Mapping[str, RunAssignment],
 ) -> bool:
-    """Did the label point at its pipe, or merely sit beside it?
+    """Did the drawing point this label at this pipe?
 
-    Proximity is the weakest thing the association stage measures and the most
-    easily satisfied by accident: every note on a busy sheet is close to some
-    pipe.  Confirmation therefore needs one of the two signals that mean the
-    label is *about* the pipe - a leader line drawn from the text to it, or the
-    text set along its axis, which is how an inline pipe label is written.
+    There is now exactly one thing that means yes: a leader was traced from the
+    label and its endpoint was verified against pipe geometry.  Alignment used
+    to count as well, because a label written along a pipe was taken to be an
+    inline label naming it - and that, together with proximity, is what
+    promoted notes and dates.  A pipe with no leader keeps its geometry and is
+    reported unnamed; nothing is inferred from where a string happens to sit.
     """
     for rid in run_ids:
         a = assignments.get(rid)
         if a is None or designation.designation_id not in a.designation_ids:
             continue
-        evidence = dict(a.evidence)
-        if evidence.get("leader", 0.0) > 0.0:
-            return True
-        if evidence.get("orientation", 0.0) >= MIN_ALIGNMENT_FOR_CONFIRMATION:
+        if dict(a.evidence).get("leaderTraced", 0.0) > 0.0:
             return True
     return False
 

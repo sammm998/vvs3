@@ -40,4 +40,4 @@ def test_validation_lists_every_check(analysis_b):
     _, report = analysis_b
     names = {check["check"] for check in report["validation"]["checks"]}
     assert {"conservation", "reconciliation", "no_metres_without_scale",
-            "no_confirmation_without_two_directions"} <= names
+            "no_confirmation_without_a_leader_chain"} <= names

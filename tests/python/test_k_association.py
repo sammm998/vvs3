@@ -69,13 +69,18 @@ def test_two_equally_supported_pipes_produce_AMBIGUOUS_not_a_guess(analysis_a):
     result = associate_designations(
         [centred],
         [a, b],
-        {},  # no leader
+        (),   # no leader was traced
+        (),   # so nothing was attached
+        (),
         {a.pipe_run_id: designation.diameter_mm, b.pipe_run_id: designation.diameter_mm},
         7.0,
     )
     assigned = [v for v in result.assignments.values() if v.designation is not None]
     assert not assigned, "an equidistant label must not be assigned to either pipe"
-    assert any(code == "COMPETING_PIPES" for _id, code in result.diagnostics)
+    # It is not even a contest: with no leader there is nothing to compete over,
+    # and the label is reported as having reached no association evidence.
+    assert any(code == "NO_ASSOCIATION_EVIDENCE" for _id, code in result.diagnostics)
+    assert result.proximity_hints, "the distance is still measured, and still unused"
 
 
 def test_designation_propagates_only_across_matching_widths(analysis_a):

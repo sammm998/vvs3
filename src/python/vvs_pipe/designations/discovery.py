@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from ..canonical import canonical_sort, entity_id, qs
 from ..geometry.index import SpatialIndex
@@ -150,7 +150,16 @@ def discover_designations(
     page_box: BBox,
     page: int,
     exclude_object_ids: frozenset[str] = frozenset(),
+    traced_leaders: Mapping[str, "object"] | None = None,
 ) -> DesignationDiscovery:
+    """Read the sheet's text and score what each string could be.
+
+    ``traced_leaders`` maps a text item to the leader
+    :mod:`vvs_pipe.association.leaders` actually traced for it.  When it is
+    given, that is what "this label has a leader" means here too - a single
+    two-point stroke touching a label is not a leader, and treating it as one
+    was how the role scores came to rest on evidence the drawing never gave.
+    """
     items = canonical_sort(list(text_items), key=lambda t: t.canonical_key())
     caps = sorted(max(t.height, 1e-3) for t in items) or [7.0]
     median_cap = caps[len(caps) // 2]
@@ -159,7 +168,7 @@ def discover_designations(
         (oid, seg)
         for oid, seg in _leader_candidates(objects, median_cap)
         if oid not in exclude_object_ids
-    ]
+    ] if traced_leaders is None else []
     leader_index: SpatialIndex[int] = SpatialIndex.for_items(
         [(s.bbox, i) for i, (_oid, s) in enumerate(leaders)]
     )
@@ -223,7 +232,14 @@ def discover_designations(
         readable = t.state is not IdentityState.UNRESOLVED and len(t.text.strip()) >= 2
         has_leader = False
         leader_len = 0.0
-        for li in (leader_index.query_box(probe) if readable else ()):
+        traced = (traced_leaders or {}).get(t.text_id)
+        if traced is not None:
+            has_leader = True
+            leader_len = float(getattr(traced, "length", 0.0))
+            for oid in getattr(traced, "object_ids", ()):  # keep them out of pipe detection
+                attached_leaders.add(oid)
+            attached_pairs.append((t.text_id, Segment(traced.polyline[0], traced.polyline[-1])))
+        for li in (leader_index.query_box(probe) if readable and traced_leaders is None else ()):
             oid, s = leaders[li]
             for end, other in ((s.a, s.b), (s.b, s.a)):
                 if probe.contains_point(end) and not t.bbox.expanded(-0.1).contains_point(other):

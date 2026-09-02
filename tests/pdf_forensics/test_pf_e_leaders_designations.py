@@ -15,11 +15,28 @@ def test_callouts_get_leaders(analysis_a):
         assert leader.segment_ids
 
 
-def test_no_designation_is_confirmed_without_two_directions(analysis_a, analysis_b):
+def test_no_designation_is_confirmed_without_a_leader_chain(analysis_a, analysis_b):
+    """Proximity may corroborate a claim; it may never make one.
+
+    This test asserted that both directions were required.  The rule is now the
+    chain the drawing states - the label's leader, and the geometry at its end -
+    with the neighbourhood as corroboration, because requiring the backward
+    direction let whatever note happened to sit nearest a pipe outrank the
+    callout that pointed at it.
+    """
     for workspace, _ in (analysis_a, analysis_b):
         for association in workspace.associations:
             if association.state == State.CONFIRMED:
-                assert association.forward and association.backward, association
+                assert association.forward.get("leaderId"), association
+        for hint in workspace.proximity_hints:
+            assert hint["usedForAssociation"] is False
+
+
+def test_a_label_that_only_sits_near_a_pipe_creates_no_association(analysis_a):
+    workspace, _ = analysis_a
+    associated = {(a.candidate_id, a.pipe_id) for a in workspace.associations}
+    for hint in workspace.proximity_hints:
+        assert (hint["candidateId"], hint["pipeId"]) not in associated
 
 
 def test_a_candidate_alone_is_never_a_designation(analysis_a):

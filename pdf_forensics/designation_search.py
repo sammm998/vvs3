@@ -174,23 +174,27 @@ def _point_segment(p: Sequence[float], a: Sequence[float], b: Sequence[float]) -
 
 def associate(candidates: Sequence[DesignationCandidate], pipes: Sequence[PhysicalPipe],
               leaders_by_text: dict[str, Leader],
-              text_items: Sequence[TextItem]) -> list[Association]:
-    """Match designations to pipes from both directions.
+              text_items: Sequence[TextItem]) -> tuple[list[Association], list[dict]]:
+    """Match designations to pipes along the chain the drawing drew.
 
-    Forward:  designation -> its leader -> the leader's far end -> the pipe there.
-    Backward: pipe -> its own neighbourhood -> the labels in it -> the designation.
+    Forward - designation -> its leader -> the leader's far end -> the pipe
+    there - is the drawing *stating* the pairing, and it is the only thing that
+    can create an association.  Backward - is this label in that pipe's own
+    neighbourhood - corroborates a forward claim and raises its confidence; it
+    can never make one.  A label that is merely near a pipe produces a
+    proximity hint, which is reported and not used: on a real sheet every note,
+    date and drawing number is near something.
 
-    Support from both directions is what confirms a pair.  One direction alone
-    is ``ONE_DIRECTION_ONLY``; two candidates with equal support are
-    ``AMBIGUOUS`` and neither wins.
+    Two leaders landing on one pipe is a contradiction, and leaves both
+    AMBIGUOUS rather than picking the nearer.
     """
     geometry = PipeGeometryIndex(pipes)
     by_text = {t.text_id: t for t in text_items}
+    by_candidate = {c.candidate_id: c for c in candidates}
     forward: dict[tuple[str, str], dict] = {}
-    backward: dict[tuple[str, str], dict] = {}
+    hints: list[dict] = []
 
-    # -- forward -----------------------------------------------------------
-    for candidate in candidates:
+    for candidate in sort_canonical(list(candidates), key=lambda c: (c.page, c.bbox, c.candidate_id)):
         leader = leaders_by_text.get(candidate.text_id)
         if leader is None:
             continue
@@ -215,80 +219,72 @@ def associate(candidates: Sequence[DesignationCandidate], pipes: Sequence[Physic
             "rule": "LEADER_ENDS_ON_PIPE",
         }
 
-    # -- backward ----------------------------------------------------------
+    # backward: corroboration only - is this label in that pipe's neighbourhood
     text_index = SpatialIndex([(c.candidate_id, c.page, c.bbox) for c in candidates])
-    by_candidate = {c.candidate_id: c for c in candidates}
+    caps = sorted(by_text[c.text_id].cap_height for c in candidates) or [6.0]
+    reach = 4.0 * caps[len(caps) // 2]
+    backward: dict[tuple[str, str], dict] = {}
     for pipe in pipes:
         xs = [p[0] for p in pipe.centerline]
         ys = [p[1] for p in pipe.centerline]
         if not xs:
             continue
         box = (min(xs), min(ys), max(xs), max(ys))
-        caps = [by_text[c.text_id].cap_height for c in candidates if c.page == pipe.page]
-        reach = 4.0 * (sorted(caps)[len(caps) // 2] if caps else 6.0)
-        nearby = [by_candidate[k] for k in text_index.within_distance(pipe.page, box, reach)]
-        scored: list[tuple[float, str]] = []
-        for candidate in nearby:
+        for key in text_index.within_distance(pipe.page, box, reach):
+            candidate = by_candidate[key]
+            if candidate.signals.get("inLegend"):
+                continue          # a legend is a key to the sheet, not a label on this pipe
             centre = ((candidate.bbox[0] + candidate.bbox[2]) / 2.0,
                       (candidate.bbox[1] + candidate.bbox[3]) / 2.0)
             distance = distance_to_pipe(centre, pipe)
             leader = leaders_by_text.get(candidate.text_id)
             if leader is not None:
-                lead_distance = distance_to_pipe(leader.target_end, pipe)
-                distance = min(distance, lead_distance)
-            scored.append((q(distance), candidate.candidate_id))
-        if not scored:
-            continue
-        scored.sort(key=lambda pair: (pair[0], pair[1]))
-        if len(scored) > 1 and abs(scored[0][0] - scored[1][0]) < 0.05:
-            backward[(scored[0][1], pipe.pipe_id)] = {
-                "distance": scored[0][0],
-                "state": State.AMBIGUOUS,
-                "reason": Reason.COMPETING_DESIGNATIONS_EQUALLY_SUPPORTED,
-                "competitors": [scored[0][1], scored[1][1]],
-            }
-            continue
-        distance, candidate_id = scored[0]
-        backward[(candidate_id, pipe.pipe_id)] = {
-            "distance": distance,
-            "rule": "NEAREST_LABEL_IN_THE_PIPE_NEIGHBOURHOOD",
-            "consideredCandidates": len(scored),
-        }
+                distance = min(distance, distance_to_pipe(leader.target_end, pipe))
+            record = {"distance": q(distance), "rule": "LABEL_IN_THE_PIPE_NEIGHBOURHOOD"}
+            pair = (candidate.candidate_id, pipe.pipe_id)
+            if pair in forward:
+                backward[pair] = record
+            else:
+                hints.append({"candidateId": candidate.candidate_id, "pipeId": pipe.pipe_id,
+                              "distance": q(distance), "text": candidate.text,
+                              "usedForAssociation": False})
+
+    # a pipe that two leaders point at is a contradiction, not a majority
+    claims: dict[str, list[str]] = {}
+    for candidate_id, pipe_id in forward:
+        claims.setdefault(pipe_id, []).append(candidate_id)
 
     associations: list[Association] = []
-    for key in sorted(set(forward) | set(backward)):
+    for key in sorted(forward):
         candidate_id, pipe_id = key
-        f = forward.get(key)
+        f = forward[key]
         b = backward.get(key)
-        reasons: list[str] = []
-        if f is not None and b is not None:
-            if f.get("state") == State.AMBIGUOUS or b.get("state") == State.AMBIGUOUS:
-                state = State.AMBIGUOUS
-                reasons = [r for r in (f.get("reason"), b.get("reason")) if r]
-                score = 0.4
-            else:
-                state = State.CONFIRMED
-                score = q(min(1.0, 0.6 + 0.4 * by_candidate[candidate_id].score))
-        else:
+        texts = {by_candidate[c].text for c in claims.get(pipe_id, ())}
+        if f.get("state") == State.AMBIGUOUS:
+            state, reasons, score = State.AMBIGUOUS, [f["reason"]], 0.4
+        elif len(texts) > 1:
             state = State.AMBIGUOUS
-            reasons = [Reason.ONE_DIRECTION_ONLY]
-            single = f or b
-            if single and single.get("reason"):
-                reasons.append(single["reason"])
-            score = q(0.3 * by_candidate[candidate_id].score)
+            reasons = [Reason.COMPETING_DESIGNATIONS_EQUALLY_SUPPORTED]
+            score = 0.4
+        else:
+            state = State.CONFIRMED
+            reasons = [] if b else [Reason.ONE_DIRECTION_ONLY]
+            score = q(min(1.0, 0.70 + 0.20 * (1.0 if b else 0.0)
+                          + 0.10 * by_candidate[candidate_id].score))
         associations.append(
             Association(
                 association_id=entity_id("assoc", {"c": candidate_id, "p": pipe_id}),
                 candidate_id=candidate_id,
                 pipe_id=pipe_id,
-                forward=f or {},
+                forward=f,
                 backward=b or {},
                 score=score,
                 state=state,
                 reasons=tuple(sorted(set(reasons))),
             )
         )
-    return sort_canonical(associations, key=lambda a: (a.candidate_id, a.pipe_id))
+    return (sort_canonical(associations, key=lambda a: (a.candidate_id, a.pipe_id)),
+            sort_canonical(hints, key=lambda h: (h["candidateId"], h["pipeId"])))
 
 
 def resolve(associations: Sequence[Association]) -> tuple[dict[str, Association], list[Association]]:

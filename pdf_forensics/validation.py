@@ -76,13 +76,18 @@ def run_checks(conservation: dict, reconciliation: dict, pipes: Sequence[Physica
     checks.append(Check("reconciliation", bool(reconciliation.get("ok")),
                         {k: reconciliation[k] for k in sorted(reconciliation)}))
 
+    # What confirms an association is the chain the drawing drew: the label's
+    # leader, and the pipe geometry at that leader's end.  The backward
+    # direction - is the label in the pipe's neighbourhood - corroborates it and
+    # raises confidence, but proximity may never create or confirm an
+    # association, so the gate is on the forward evidence.
     unsupported = []
     for association in associations:
         if association.state != State.CONFIRMED:
             continue
-        if not association.forward or not association.backward:
+        if not association.forward or not association.forward.get("leaderId"):
             unsupported.append(association.association_id)
-    checks.append(Check("no_confirmation_without_two_directions", not unsupported,
+    checks.append(Check("no_confirmation_without_a_leader_chain", not unsupported,
                         {"offenders": sorted(unsupported)}))
 
     named_without_association = sorted(

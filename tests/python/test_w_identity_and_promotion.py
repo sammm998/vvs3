@@ -111,7 +111,12 @@ def _pipe(designation, run_ids, pid="pp1", length=120.0) -> PhysicalPipe:
     )
 
 
-def _assignment(did, leader=0.9, orientation=0.5) -> RunAssignment:
+def _assignment(did, leader=1.0, orientation=0.5) -> RunAssignment:
+    """An assignment as the chain produces one.
+
+    ``leaderTraced`` is the only key promotion looks at: it means a leader was
+    traced from this label and its endpoint was verified against pipe geometry.
+    """
     return RunAssignment(
         designation=None,
         designation_ids=(did,),
@@ -119,7 +124,8 @@ def _assignment(did, leader=0.9, orientation=0.5) -> RunAssignment:
         state=IdentityState.HIGH_CONFIDENCE,
         reasons=(),
         association_confidence=0.8,
-        evidence=(("leader", leader), ("orientation", orientation), ("proximity", 0.9)),
+        evidence=(("leaderTraced", leader), ("orientation", orientation),
+                  ("attachmentDistancePt", 0.5)),
     )
 
 
@@ -270,7 +276,14 @@ def test_a_label_that_only_sits_near_a_pipe_is_not_confirmed():
     assert dict(promoted[0].pipe_evidence)["pointsAtItsPipe"] == 0.0
 
 
-def test_a_label_written_along_its_pipe_is_confirmed_without_a_leader():
+def test_a_label_written_along_its_pipe_is_not_confirmed_without_a_leader():
+    """Alignment is corroboration, not a statement.
+
+    A label set along a pipe used to be promoted on that alone.  On the
+    production sheet the same rule promoted anything a pipe happened to run
+    parallel to, so alignment is now published as evidence and confirms
+    nothing: only a traced leader verified against pipe geometry does.
+    """
     d = _designation("S3-R8-110")
     promoted = promote_designations(
         [d],
@@ -278,7 +291,8 @@ def test_a_label_written_along_its_pipe_is_confirmed_without_a_leader():
         [_pipe("S3-R8-110", ["run1"])],
         {"run1": _assignment("des1", leader=0.0, orientation=0.95)},
     )
-    assert promoted[0].tier is DesignationTier.CONFIRMED_DESIGNATION
+    assert promoted[0].tier is DesignationTier.DESIGNATION_CANDIDATE
+    assert Reason.NO_PIPE_EVIDENCE in promoted[0].reasons
 
 
 def test_code_like_text_with_no_pipe_stays_a_candidate():
@@ -471,48 +485,118 @@ def _label(text, x0, y0, diameter=None, did="des1"):
     )
 
 
-def test_an_inline_label_with_no_leader_still_names_its_pipe():
-    """The failure that discarded 110 correctly read labels on the real sheet.
+def _leader(text_id, points, leader_id="leader1"):
+    from vvs_pipe.association.leaders import VectorLeader
 
-    Most pipe labels on a real drawing have no leader at all: they are written
-    on the pipe.  A scheme that only accepts leaders names almost nothing.
+    return VectorLeader(
+        leader_id=leader_id,
+        page=1,
+        text_id=text_id,
+        object_ids=("obj_leader",),
+        polyline=tuple(points),
+        root=points[0],
+        tip=points[-1],
+        length=sum(
+            ((points[i + 1][0] - points[i][0]) ** 2 + (points[i + 1][1] - points[i][1]) ** 2) ** 0.5
+            for i in range(len(points) - 1)
+        ),
+        hops=len(points) - 2,
+    )
+
+
+def _attachment(text_id, run_id, tip, layer="W50-VVS-FE", leader_id="leader1"):
+    from vvs_pipe.association.attachment import FeAttachment
+
+    return FeAttachment(
+        attachment_id="att1",
+        leader_id=leader_id,
+        text_id=text_id,
+        run_id=run_id,
+        fe_object_id="obj_fe",
+        fe_layer=layer,
+        tip=tip,
+        distance_pt=0.5,
+    )
+
+
+def test_an_inline_label_with_no_leader_names_nothing():
+    """Closeness is not a statement, however close it is.
+
+    This test used to assert the opposite, and that is the regression it now
+    guards: on the production sheet, binding labels by proximity promoted
+    dates, `ENL. PM-n` references, drawing numbers and duct-schedule strings
+    into pipe designations, because on a plan sheet everything sits near a
+    line.  A label names a pipe when the draughtsman drew a leader to it, and
+    not otherwise; an unlabelled pipe is reported as unlabelled.
     """
     run = _run([(0.0, 0.0), (400.0, 0.0)], "run1")
-    label = _label("S3-R8-75", 100.0, 1.0, diameter=75.0)
-    result = associate_designations([label], [run], {}, {"run1": None}, 7.0)
+    label = _label("S3-R8-75", 100.0, 1.0, diameter=75.0)  # a fraction of a cap away
+    result = associate_designations([label], [run], (), (), (), {"run1": None}, 7.0)
+    assert not [a for a in result.assignments.values() if a.designation]
+    assert result.proximity_hints, "the closeness is still measured and reported"
+    assert result.counts.verified_attachments == 0
+
+
+def test_a_leader_that_reaches_pipe_geometry_names_it():
+    run = _run([(0.0, 0.0), (400.0, 0.0)], "run1")
+    label = _label("S3-R8-75", 100.0, 40.0, diameter=75.0)
+    leader = _leader(label.text_item_id, [(115.0, 40.0), (150.0, 20.0), (150.0, 0.5)])
+    attachment = _attachment(label.text_item_id, "run1", (150.0, 0.5))
+    result = associate_designations(
+        [label], [run], [leader], [attachment], (), {"run1": None}, 7.0
+    )
     assert result.assignments["run1"].designation == "S3-R8-75"
+    assert result.assignments["run1"].state is IdentityState.CONFIRMED
+    assert result.counts.verified_attachments == 1
+    chain = result.chains[0]
+    assert chain.leader_object_ids and chain.fe_object_id and chain.pipe_run_id == "run1"
 
 
 def test_a_label_several_cap_heights_away_with_no_leader_names_nothing():
     run = _run([(0.0, 0.0), (400.0, 0.0)], "run1")
     label = _label("S3-R8-75", 100.0, 40.0, diameter=75.0)  # ~5.7 caps off
-    result = associate_designations([label], [run], {}, {"run1": None}, 7.0)
+    result = associate_designations([label], [run], (), (), (), {"run1": None}, 7.0)
     assert not [a for a in result.assignments.values() if a.designation]
 
 
-def test_a_stated_size_contradicting_the_drawn_width_blocks_an_inline_binding():
-    """A label reading -110 bound to a run measured at 533 mm is the wrong pipe."""
+def test_a_stated_size_contradicting_the_drawn_width_is_recorded_not_hidden():
+    """A leader states the pairing; a size disagreement is a dimension question.
+
+    The chain still binds - the drawing said so - but the disagreement is
+    published as evidence rather than being silently accepted or silently
+    dropped.
+    """
     run = _run([(0.0, 0.0), (400.0, 0.0)], "run1", width=30.0)
-    label = _label("S3-R8-110", 100.0, 1.0, diameter=110.0)
-    agreeing = associate_designations([label], [run], {}, {"run1": 110.0}, 7.0)
-    assert agreeing.assignments["run1"].designation == "S3-R8-110"
+    label = _label("S3-R8-110", 100.0, 40.0, diameter=110.0)
+    leader = _leader(label.text_item_id, [(115.0, 40.0), (150.0, 0.5)])
+    attachment = _attachment(label.text_item_id, "run1", (150.0, 0.5))
+    conflicting = associate_designations(
+        [label], [run], [leader], [attachment], (), {"run1": 533.0}, 7.0
+    )
+    evidence = dict(conflicting.assignments["run1"].evidence)
+    assert conflicting.assignments["run1"].designation == "S3-R8-110"
+    assert evidence["sizeConsistency"] < 0.5
 
-    conflicting = associate_designations([label], [run], {}, {"run1": 533.0}, 7.0)
-    assert not [a for a in conflicting.assignments.values() if a.designation]
 
-
-def test_two_pipes_equally_close_to_an_inline_label_leave_it_ambiguous():
-    """The inline path must not degenerate into "nearest wins"."""
-    from vvs_pipe.association import associate_designations
-    # Close enough to either that both clear the acceptance threshold, and
-    # exactly equidistant, so the only thing that could separate them is an
-    # arbitrary tie-break.
-    a = _run([(0.0, 4.0), (400.0, 4.0)], "runA")
-    b = _run([(0.0, -4.0), (400.0, -4.0)], "runB")
-    label = _label("S3-R8-75", 100.0, -3.5, diameter=75.0)
-    result = associate_designations([label], [a, b], {}, {"runA": None, "runB": None}, 7.0)
-    assert not [x for x in result.assignments.values() if x.designation]
-    assert any(code == Reason.COMPETING_PIPES.value for _id, code in result.diagnostics)
+def test_two_labels_whose_leaders_reach_one_run_leave_it_ambiguous():
+    """Two statements about one pipe are a contradiction, not a majority."""
+    run = _run([(0.0, 0.0), (400.0, 0.0)], "run1")
+    first = _label("S3-R8-75", 100.0, 40.0, diameter=75.0, did="desA")
+    second = _label("S3-K2-75", 260.0, 40.0, diameter=75.0, did="desB")
+    second = replace(second, text_item_id="txtB")
+    leaders = [
+        _leader(first.text_item_id, [(115.0, 40.0), (150.0, 0.5)], "leaderA"),
+        _leader(second.text_item_id, [(275.0, 40.0), (300.0, 0.5)], "leaderB"),
+    ]
+    attachments = [
+        _attachment(first.text_item_id, "run1", (150.0, 0.5), leader_id="leaderA"),
+        _attachment(second.text_item_id, "run1", (300.0, 0.5), leader_id="leaderB"),
+    ]
+    result = associate_designations(
+        [first, second], [run], leaders, attachments, (), {"run1": None}, 7.0
+    )
+    assert result.assignments["run1"].designation is None
+    assert result.assignments["run1"].state is IdentityState.AMBIGUOUS
 
 
 # ------------------------------------------------------- stacked-part merging
