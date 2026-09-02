@@ -96,12 +96,22 @@ def render_marked(result, out_path: str | Path) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc = fitz.open(result.source_path)
-    layers = _layers(doc, ["Pipe geometry", "Pipe captions", "Vertical pipe", "Legend key"])
+    layers = _layers(doc, ["Pipe geometry", "Pipe captions", "Vertical pipe", "Legend key",
+                           "Unattested linework"])
     try:
         for page_result in result.pages:
             page = doc[page_result.page]
             _strip_annotations(page)
             for pipe in page_result.physical_pipes:
+                if not getattr(pipe, "on_attested_layer", True):
+                    # Kept visible, and visibly not part of the take-off.
+                    shape = page.new_shape()
+                    for poly in pipe.centerline:
+                        _polyline(shape, poly)
+                    shape.finish(color=(0.55, 0.55, 0.55), width=0.7, stroke_opacity=0.5,
+                                 closePath=False, oc=layers["Unattested linework"])
+                    shape.commit()
+                    continue
                 color = _color(pipe.identity_state.value)
                 shape = page.new_shape()
                 for poly in pipe.centerline:

@@ -24,8 +24,12 @@ from typing import Any, Sequence
 
 from .artwork import detect_artwork
 from .association import associate_designations
-from .association.attachment import (attach_leaders, discover_pipe_layers,
-                                     source_objects_of_run)
+from .association.attachment import (attach_leaders, attested_pipe_layers,
+                                     discover_pipe_layers, source_objects_of_run)
+
+# How much of a physical pipe must stand on a layer the drawing's own leaders
+# point at before it is counted as pipework rather than reported as linework.
+MIN_ATTESTED_PIPE_SHARE = 0.5
 from .association.associate import ChainFailure
 from .association.leaders import leaders_by_text_item, lettering_pen, trace_leaders
 from .canonical import canonical_json, canonical_sort, digest, ql, qs
@@ -285,13 +289,27 @@ def analyse_extracted(
         pages.append(_analyse_page(doc, page_info.page, page_info, cfg, bank))
 
     all_pipes = [pp for p in pages for pp in p.physical_pipes]
-    quantities = aggregate_quantities(all_pipes)
+    # The take-off counts the pipework the drawing attests: geometry on the
+    # layers its own verified leaders point at.  Everything else is kept,
+    # measured and reported as unattributed linework rather than being deleted
+    # or, worse, counted - a plan sheet's background is far longer than its
+    # piping, and counting it produces a confident number that is wrong.
+    attested_pipes = [pp for pp in all_pipes if pp.on_attested_layer]
+    unattested = [pp for pp in all_pipes if not pp.on_attested_layer]
+    quantities = aggregate_quantities(attested_pipes)
     report = reconcile(
         [c for p in pages for c in p.candidates],
         [r for p in pages for r in p.runs],
         all_pipes,
         quantities,
     )
+    for page_result in pages:
+        page_result.diagnostics["unattributedGeometry"] = {
+            "pipes": len([pp for pp in unattested if pp.page == page_result.page]),
+            "lengthPt": qs(sum(pp.length_pt for pp in unattested
+                               if pp.page == page_result.page)),
+            "note": "geometry no verified leader points at; measured, not counted",
+        }
     return AnalysisResult(
         source_path=source_path,
         forensics=forensics,
@@ -479,6 +497,49 @@ def _analyse_page(doc: VectorDocument, page: int, page_info, cfg: PipelineConfig
             )
 
     pipes = build_physical_pipes(runs, resolved, page, mpp, verticals.by_run)
+
+    # Which layers the sheet itself says carry pipework: the ones its verified
+    # leaders land on.  Geometry elsewhere is kept, measured and reported - it
+    # is simply not counted as pipe, because nothing on the drawing says it is.
+    attested = attested_pipe_layers(attachments, fallback=pipe_layers)
+    layer_of_object = {oid: o.layer for oid, o in objects_by_id.items()}
+
+    runs_by_id = {r.pipe_run_id: r for r in runs}
+
+    def _attested_share(pipe) -> tuple[float, str | None]:
+        """How much of a pipe's length stands on a layer the drawing points at.
+
+        A touch is not enough: a run of building fabric that happens to meet
+        one pipe would inherit its standing.  The share is taken over the
+        pipe's own run lengths, so a pipe is pipework when most of it is.
+        """
+        attested_length = 0.0
+        total = 0.0
+        best: str | None = None
+        for rid in pipe.pipe_run_ids:
+            run = runs_by_id.get(rid)
+            if run is None:
+                continue
+            length = run.length_pt
+            total += length
+            layers = {layer_of_object.get(oid) for oid in run_source_objects.get(rid, ())}
+            here = sorted(x for x in layers if x and x in attested.names)
+            if here:
+                attested_length += length
+                best = best or here[0]
+        return (attested_length / total if total > 0.0 else 0.0), best
+
+    marked_pipes = []
+    for physical in pipes:
+        share, layer = _attested_share(physical)
+        marked_pipes.append(
+            replace(
+                physical,
+                on_attested_layer=(not attested.active) or share >= MIN_ATTESTED_PIPE_SHARE,
+                attested_layer=layer,
+            )
+        )
+    pipes = tuple(marked_pipes)
 
     # Complete each chain with the physical pipe its run ended up in, so the
     # published chain runs from the glyphs all the way to the measured entity.

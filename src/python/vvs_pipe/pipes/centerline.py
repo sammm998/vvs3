@@ -42,6 +42,7 @@ class SegmentRef:
     stroke_width: float | None
     color: tuple[float, float, float] | None
     dashes: str | None
+    layer: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +87,12 @@ def _compatible(a: SegmentRef, b: SegmentRef, cfg: PairingConfig) -> bool:
         if abs(aw - bw) > 1e-3:
             return False
     if (a.dashes or "") != (b.dashes or ""):
+        return False
+    if (a.layer or "") != (b.layer or ""):
+        # A pipe's two walls are drawn together, on one layer.  Pairing across
+        # layers is what let a room's wall and a grid line, or two different
+        # services passing each other, become a pipe: on a plan sheet there is
+        # always some second line at a pipe-like distance from any first one.
         return False
     return True
 

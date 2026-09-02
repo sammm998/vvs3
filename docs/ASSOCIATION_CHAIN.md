@@ -169,3 +169,38 @@ that sheet's 467 glyph candidates, so there is no text for a chain to start
 from.  Its facit lists `KV1-X31-16` at 3.9 m + 7.0 m and `S3-R8-75` at 3.1 m +
 3.6 m; the engine currently produces nothing to compare against them.  Reading
 that sheet's lettering is a separate defect from this one.
+
+
+## Counting pipework, not linework
+
+The chain fixed *identification*.  Running it on W501A0011 then exposed the
+other half plainly: the sheet produced **303 physical pipes and 1 395 m** of
+take-off, on a drawing whose drainage is a few hundred metres.  Most of those
+"pipes" were the architectural background - hatching, wall pairs, a structural
+grid - because two parallel strokes at a pipe-like separation are
+indistinguishable from a pipe by geometry alone.  On a plan sheet there is
+always a second line at a pipe-like distance from any first one.
+
+What separates them is, again, the drawing's own statement.  A verified leader
+landing on a layer says *that layer carries pipework*:
+
+* a layer is attested when several verified leaders land on it - three at
+  least, and a real share of them, so one mis-traced leader cannot promote the
+  architectural background;
+* only geometry whose bore the drawing draws attests a layer - a wall pair or a
+  dash chain.  A bare unpaired stroke is the weakest verdict the detector
+  makes, and a leader landing near one is not evidence about a whole layer;
+* a physical pipe is counted when **most of its length** stands on attested
+  layers, not when it merely touches one, so a run of fabric that meets a pipe
+  does not inherit its standing;
+* a drawing that declares no layers leaves the gate open: nothing is withheld.
+
+Everything else is still extracted, measured and published - as
+`unattributedGeometry`, and drawn on the marked drawing in grey on its own
+switchable layer.  Nothing is deleted to make a number look better.
+
+On W501A0011 that takes the take-off from 1 395 m over 303 "pipes" to **487 m
+over 80**, with 221 pipes and 56 531 pt of linework reported as unattributed.
+The 420 m of that total which no leader named is published as an unnamed row
+rather than hidden: it is pipework the drawing draws and does not label
+anywhere the engine could read.

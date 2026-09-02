@@ -47,6 +47,10 @@ LAYER_MIN_SHARE = 0.02
 # the two are drawn with similar pens.
 MAX_SHARE_ALONG_RUN = 0.5
 ALONG_FLOOR_PT = 2.0
+# How many verified leaders must land on a layer before it counts as carrying
+# pipework, and what share of them.
+MIN_ATTESTING_ATTACHMENTS = 3
+MIN_ATTESTED_SHARE = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +86,10 @@ class FeAttachment:
     fe_layer: str | None
     tip: Pt
     distance_pt: float
+    # The style of the run this landed on.  A pipe whose bore the drawing
+    # actually draws - two walls, or a dash chain - is evidence about its
+    # layer; a bare stroke that nothing else corroborates is not.
+    run_style: str = ""
 
     def canonical_key(self) -> tuple:
         return (self.text_id, self.run_id, (qc(self.tip[0]), qc(self.tip[1])))
@@ -96,6 +104,7 @@ class FeAttachment:
             "feLayer": self.fe_layer,
             "tip": [qc(self.tip[0]), qc(self.tip[1])],
             "distancePt": qs(self.distance_pt),
+            "runStyle": self.run_style,
         }
 
 
@@ -120,6 +129,51 @@ class AttachmentFailure:
             "reason": self.reason,
             "detail": {k: v for k, v in self.detail},
         }
+
+
+def attested_pipe_layers(
+    attachments: Sequence[FeAttachment],
+    fallback: "PipeLayers | None" = None,
+) -> PipeLayers:
+    """The layers the drawing's own leaders point at.
+
+    This is the strongest statement a sheet makes about what is pipework: a
+    draughtsman drew a line from a pipe designation to *this* geometry.  Layers
+    ranked by how much accepted centerline they carry cannot say that - on a
+    plan sheet the architectural background carries more line than the piping
+    does, and a wall pair at a pipe-like separation is indistinguishable from a
+    pipe until something points at one of them.
+
+    Where no attachment was verified there is nothing to attest, and the
+    fallback (or an inactive gate) is returned rather than an empty answer that
+    would silently exclude everything.
+    """
+    counts: dict[str, int] = {}
+    for a in attachments:
+        # Only geometry whose bore the drawing draws attests a layer: a pair of
+        # walls or a dash chain.  A single unpaired stroke is the weakest thing
+        # the detector accepts, and one leader landing near one of them is not
+        # evidence that a whole layer is pipework.
+        if a.fe_layer and a.run_style in ("double_line", "dashed_line"):
+            counts[a.fe_layer] = counts.get(a.fe_layer, 0) + 1
+    if not counts:
+        return fallback or PipeLayers(frozenset(), (), active=False)
+    total = float(sum(counts.values()))
+    shares = sorted(((name, n / total) for name, n in counts.items()),
+                    key=lambda kv: (-kv[1], kv[0]))
+    # A layer the drawing points at once, among a hundred, is a mis-traced
+    # leader rather than a system.  A layer it points at repeatedly is a system.
+    names = frozenset(
+        name for name, share in shares
+        if counts[name] >= MIN_ATTESTING_ATTACHMENTS and share >= MIN_ATTESTED_SHARE
+    )
+    if not names:
+        return fallback or PipeLayers(frozenset(), (), active=False)
+    return PipeLayers(
+        names=names,
+        shares=tuple((name, qs(share)) for name, share in shares),
+        active=True,
+    )
 
 
 def discover_pipe_layers(
@@ -285,6 +339,7 @@ def attach_leaders(
                 fe_layer=fe_layer,
                 tip=leader.tip,
                 distance_pt=distance,
+                run_style=run.style,
             )
         )
     return (

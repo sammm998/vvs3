@@ -597,6 +597,12 @@ class PhysicalPipe:
     provenance: Provenance
     # What the label said, as distinct from what the drawing measured.
     nominal_diameter_mm: float | None = None
+    # Whether this geometry stands on a layer the drawing's own leaders point
+    # at.  A plan sheet carries far more line than it carries pipe, and until
+    # something on the sheet points at a layer there is nothing to separate a
+    # wall pair at a pipe-like separation from a pipe.
+    on_attested_layer: bool = True
+    attested_layer: str | None = None
 
     def canonical_key(self) -> tuple:
         return (self.page, tuple(sorted(polyline_key(p) for p in self.centerline)))
@@ -604,6 +610,8 @@ class PhysicalPipe:
     def to_canonical(self) -> dict[str, Any]:
         return {
             "physicalPipeId": self.physical_pipe_id,
+            "onAttestedPipeLayer": self.on_attested_layer,
+            "attestedLayer": self.attested_layer,
             "page": self.page,
             "pipeRunIds": sorted(self.pipe_run_ids),
             "geometry": [[[qc(x), qc(y)] for x, y in poly] for poly in self.centerline],

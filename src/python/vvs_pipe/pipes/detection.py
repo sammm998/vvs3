@@ -192,6 +192,7 @@ def detect_pipes(
                     stroke_width=o.stroke_width,
                     color=o.stroke_color,
                     dashes=o.dashes,
+                    layer=o.layer,
                 )
             )
             kept = True
